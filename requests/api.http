@@ -1,0 +1,27 @@
+### Variables de entorno locales
+@baseUrl = http://127.0.0.1:8000
+
+### 1. Root Endpoint
+GET {{baseUrl}}/
+Accept: application/json
+
+### 2. Health Check (Liveness)
+# Utilizado por el Application Load Balancer (ALB) en ECS
+GET {{baseUrl}}/healthz/liveness
+Accept: application/json
+
+### 3. Crear una nueva orden (Draft para cuando armemos el POST)
+POST {{baseUrl}}/orders
+Content-Type: application/json
+
+{
+  "customer_id": "cust_98234",
+  "items": [
+    {
+      "sku": "TIRE-PILOT-SPORT-4S",
+      "quantity": 4,
+      "unit_price": 280.50
+    }
+  ],
+  "total_amount": 1122.00
+}
