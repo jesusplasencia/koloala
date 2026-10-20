@@ -10,7 +10,7 @@ Accept: application/json
 GET {{baseUrl}}/healthz/liveness
 Accept: application/json
 
-### 3. Crear una nueva orden (Draft para cuando armemos el POST)
+### 3. Crear una nueva QR para delivery (Draft para cuando armemos el POST)
 POST {{baseUrl}}/orders
 Content-Type: application/json
 
