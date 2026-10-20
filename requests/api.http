@@ -1,27 +1,33 @@
-### Variables de entorno locales
 @baseUrl = http://127.0.0.1:8000
 
-### 1. Root Endpoint
-GET {{baseUrl}}/
-Accept: application/json
-
-### 2. Health Check (Liveness)
-# Utilizado por el Application Load Balancer (ALB) en ECS
+### 1. Health Check
 GET {{baseUrl}}/healthz/liveness
-Accept: application/json
 
-### 3. Crear una nueva QR para delivery (Draft para cuando armemos el POST)
-POST {{baseUrl}}/orders
+### 2. Caso Exitoso: Propietario al día (MZ-B-L14) pide un Taxi
+# @name createPass
+POST {{baseUrl}}/api/v1/passes
 Content-Type: application/json
 
 {
-  "customer_id": "cust_98234",
-  "items": [
-    {
-      "sku": "TIRE-PILOT-SPORT-4S",
-      "quantity": 4,
-      "unit_price": 280.50
-    }
-  ],
-  "total_amount": 1122.00
+  "lot_id": "MZ-B-L14",
+  "pass_type": "TAXI",
+  "visitor_info": "Uber Gris - Placa B7J-412"
+}
+
+### 3. Caso Bloqueado (403): Vecino Moroso (MZ-F-L08) intenta pedir Delivery
+POST {{baseUrl}}/api/v1/passes
+Content-Type: application/json
+
+{
+  "lot_id": "MZ-F-L08",
+  "pass_type": "DELIVERY",
+  "visitor_info": "PedidosYa - Motorizado"
+}
+
+### 4. Garita verifica el código generado en el paso 2 (Toma el código automáticamente)
+POST {{baseUrl}}/api/v1/passes/verify
+Content-Type: application/json
+
+{
+  "code": "{{createPass.response.body.code}}"
 }
