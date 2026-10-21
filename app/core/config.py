@@ -7,8 +7,8 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
 
     # Reglas del Negocio Parametrizables (TTL en minutos)
-    delivery_pass_ttl_minutes: int = 30
-    taxi_pass_ttl_minutes: int = 45
+    delivery_pass_ttl_minutes: int = 45
+    taxi_pass_ttl_minutes: int = 30
     guest_pass_ttl_minutes: int = 480
 
     model_config = SettingsConfigDict(
