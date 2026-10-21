@@ -17,14 +17,6 @@ class PassStatus(StrEnum):
 
 
 # --- Entidades de Dominio ---
-class PropertyLot(BaseModel):
-    lot_id: str = Field(
-        ..., examples=["MZ-P-L20"], description="Identificador Manzana y Lote"
-    )
-    owner_name: str
-    is_maintenance_up_to_date: bool
-
-
 class GuestPass(BaseModel):
     code: str
     lot_id: str

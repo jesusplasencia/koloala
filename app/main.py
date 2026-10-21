@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
+from app.api.v1.lots import router as lots_router
 from app.api.v1.passes import router as passes_router
 from app.core.config import settings
 
@@ -10,6 +11,7 @@ app = FastAPI(
 )
 
 app.include_router(passes_router, prefix=settings.api_v1_prefix)
+app.include_router(lots_router, prefix=settings.api_v1_prefix)
 
 
 # Endpoint for the root path, returning a welcome message

@@ -1,6 +1,8 @@
 from typing import Protocol
 
-from app.models.access import GuestPass, PropertyLot
+from app.models.access import GuestPass
+from app.models.lot import PropertyLot
+from app.repositories.lots_repo import in_memory_lot_repo
 
 
 class AccessRepositoryProtocol(Protocol):
@@ -10,20 +12,12 @@ class AccessRepositoryProtocol(Protocol):
 
 
 class InMemoryAccessRepository:
-    def __init__(self) -> None:
-        # Datos semilla simulando el padrón de garita de Villa Club 3
-        self._lots: dict[str, PropertyLot] = {
-            "MZ-B-L14": PropertyLot(
-                lot_id="MZ-B-L14",
-                owner_name="Jesus Plasencia",
-                is_maintenance_up_to_date=True,
-            ),
-            "MZ-F-L08": PropertyLot(
-                lot_id="MZ-F-L08",
-                owner_name="Vecino Moroso",
-                is_maintenance_up_to_date=False,
-            ),
-        }
+    def __init__(self, lots_store: dict[str, PropertyLot] | None = None) -> None:
+        # Comparte el mismo diccionario de lotes con InMemoryLotRepository (Single Source of Truth)
+        if lots_store is not None:
+            self._lots = lots_store
+        else:
+            self._lots = in_memory_lot_repo.lots_store
         self._passes: dict[str, GuestPass] = {}
 
     async def get_lot(self, lot_id: str) -> PropertyLot | None:
@@ -38,4 +32,4 @@ class InMemoryAccessRepository:
 
 
 # Instancia singleton en memoria mientras no usemos PostgreSQL
-in_memory_repo = InMemoryAccessRepository()
+in_memory_repo = InMemoryAccessRepository(lots_store=in_memory_lot_repo.lots_store)

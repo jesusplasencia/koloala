@@ -31,3 +31,38 @@ Content-Type: application/json
 {
   "code": "{{createPass.response.body.code}}"
 }
+
+### 5. [ADMIN] Listar todos los lotes del padrón y su estado de mantenimiento
+GET {{baseUrl}}/api/v1/lots
+
+### 6. [ADMIN] Editar un lote individual (Ej: MZ-F-L08 paga su deuda por Yape)
+PATCH {{baseUrl}}/api/v1/lots/MZ-F-L08/maintenance
+Content-Type: application/json
+
+{
+  "is_maintenance_up_to_date": true
+}
+
+### 7. [ADMIN] Carga/Sincronización Masiva (Bulk Upsert de cierre de mes)
+PUT {{baseUrl}}/api/v1/lots/bulk
+Content-Type: application/json
+
+{
+  "lots": [
+    {
+      "lot_id": "MZ-B-L14",
+      "owner_name": "Jesus Plasencia",
+      "is_maintenance_up_to_date": true
+    },
+    {
+      "lot_id": "MZ-F-L08",
+      "owner_name": "Vecino Moroso",
+      "is_maintenance_up_to_date": false
+    },
+    {
+      "lot_id": "MZ-P-L20",
+      "owner_name": "Familia Torres",
+      "is_maintenance_up_to_date": true
+    }
+  ]
+}
