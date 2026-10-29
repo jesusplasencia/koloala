@@ -19,13 +19,13 @@ from app.services.lots_service import LotsService
 
 @pytest.fixture
 def user_repo() -> InMemoryUserRepository:
-    """Crea un repositorio de usuarios limpio (B14, F08, guardia1, admin) por cada test."""
+    """Crea un repositorio de usuarios limpio (VC3 y VC2) por cada test."""
     return InMemoryUserRepository()
 
 
 @pytest.fixture
 def lot_repo() -> InMemoryLotRepository:
-    """Crea un repositorio de lotes limpio (B14 al día, F08 moroso) por cada test."""
+    """Crea un repositorio de lotes limpio con llaves compuestas (villa_id, lot_id)."""
     return InMemoryLotRepository()
 
 
@@ -48,7 +48,7 @@ async def client(
     )
     app.dependency_overrides[get_user_repo] = lambda: user_repo
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app), base_url="http://vc3.lasvillas.club"
     ) as ac:
         yield ac
     app.dependency_overrides.clear()
@@ -56,30 +56,38 @@ async def client(
 
 @pytest.fixture
 def b14_headers() -> dict[str, str]:
-    token = create_access_token(username="B14", role=UserRole.RESIDENT, lot_id="B14")
+    token = create_access_token(
+        username="B14", role=UserRole.RESIDENT, villa_id="VC3", lot_id="B14"
+    )
     return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture
 def f08_headers() -> dict[str, str]:
-    token = create_access_token(username="F08", role=UserRole.RESIDENT, lot_id="F08")
+    token = create_access_token(
+        username="F08", role=UserRole.RESIDENT, villa_id="VC3", lot_id="F08"
+    )
     return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture
 def guard_headers() -> dict[str, str]:
-    token = create_access_token(username="GUARDIA1", role=UserRole.GUARD, lot_id=None)
+    token = create_access_token(
+        username="GUARDIA1", role=UserRole.GUARD, villa_id="VC3", lot_id=None
+    )
     return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture
 def admin_headers() -> dict[str, str]:
-    token = create_access_token(username="ADMIN", role=UserRole.ADMIN, lot_id=None)
+    token = create_access_token(
+        username="ADMIN", role=UserRole.ADMIN, villa_id="VC3", lot_id=None
+    )
     return {"Authorization": f"Bearer {token}"}
 
 
 # ---------------------------------------------------------------------------
-# 1. HAPPY PATH: Login B14 -> Crea pase con 1 dato -> Vigilante verifica con DNI + Placa
+# 1. HAPPY PATH: Login VC3+B14 -> Crea pase -> Vigilante verifica con DNI + Placa
 # ---------------------------------------------------------------------------
 async def test_create_and_verify_pass_happy_path(
     client: AsyncClient,
@@ -94,6 +102,7 @@ async def test_create_and_verify_pass_happy_path(
     assert create_resp.status_code == 201
     pass_data = create_resp.json()
     assert len(pass_data["code"]) == 6
+    assert pass_data["villa_id"] == "VC3"
     assert pass_data["lot_id"] == "B14"
     assert pass_data["status"] == PassStatus.ACTIVE
 
@@ -109,6 +118,7 @@ async def test_create_and_verify_pass_happy_path(
     assert verify_resp.status_code == 200
     verification = verify_resp.json()
     assert verification["authorized"] is True
+    assert verification["villa_id"] == "VC3"
     assert verification["lot_id"] == "B14"
     assert verification["owner_name"] == "Jesus Plasencia"
     assert verification["checked_in_dni"] == "45891230"
@@ -179,7 +189,7 @@ async def test_cannot_reuse_already_used_pass(
 
 
 # ---------------------------------------------------------------------------
-# 4. REGLA DE MOROSIDAD (403 Forbidden): Vecino F08 con deuda no genera pases
+# 4. REGLA DE MOROSIDAD (403 Forbidden): Vecino VC3+F08 con deuda no genera pases
 # ---------------------------------------------------------------------------
 async def test_delinquent_lot_cannot_create_pass(
     client: AsyncClient,
@@ -210,7 +220,7 @@ async def test_expired_pass_is_denied_at_gatehouse(
     )
     code = create_resp.json()["code"]
 
-    stored_pass = await repo.get_pass_by_code(code)
+    stored_pass = await repo.get_pass_by_code("VC3", code)
     assert stored_pass is not None
     stored_pass.expires_at = datetime.now(UTC) - timedelta(minutes=1)
     await repo.save_pass(stored_pass)
@@ -223,7 +233,7 @@ async def test_expired_pass_is_denied_at_gatehouse(
     assert verify_resp.json()["authorized"] is False
     assert "expirado" in verify_resp.json()["message"]
 
-    updated_pass = await repo.get_pass_by_code(code)
+    updated_pass = await repo.get_pass_by_code("VC3", code)
     assert updated_pass is not None
     assert updated_pass.status == PassStatus.EXPIRED
 
@@ -262,7 +272,7 @@ async def test_pass_denied_if_admin_marks_lot_delinquent_before_arrival(
 
 
 # ---------------------------------------------------------------------------
-# 7. ADMIN BULK SYNC: Crea nuevos lotes (U28, P20) y autogenera claves WhatsApp
+# 7. ADMIN BULK SYNC: Crea nuevos lotes con email (VC3+P20) y autogenera claves
 # ---------------------------------------------------------------------------
 async def test_admin_bulk_upsert_generates_credentials_and_allows_login(
     client: AsyncClient,
@@ -274,13 +284,15 @@ async def test_admin_bulk_upsert_generates_credentials_and_allows_login(
         json={
             "lots": [
                 {
-                    "lot_id": "F08",  # Existente (ahora ya pagó)
+                    "lot_id": "F08",
                     "owner_name": "Vecino Ya Pagó",
+                    "owner_email": "f08@lasvillas.club",
                     "is_maintenance_up_to_date": True,
                 },
                 {
-                    "lot_id": "U28",  # Nuevo lote en el padrón
-                    "owner_name": "Familia Salgado",
+                    "lot_id": "P20",
+                    "owner_name": "Familia Torres",
+                    "owner_email": "torres.p20@gmail.com",
                     "is_maintenance_up_to_date": True,
                 },
             ]
@@ -288,23 +300,28 @@ async def test_admin_bulk_upsert_generates_credentials_and_allows_login(
     )
     assert bulk_resp.status_code == 200
     data = bulk_resp.json()
+    assert data["villa_id"] == "VC3"
     assert data["processed_count"] == 2
     assert data["created_count"] == 1
     assert data["updated_count"] == 1
     assert len(data["generated_credentials"]) == 1
 
-    u28_cred = data["generated_credentials"][0]
-    assert u28_cred["lot_id"] == "U28"
-    assert u28_cred["initial_password"].startswith("VC3-U28-")
+    p20_cred = data["generated_credentials"][0]
+    assert p20_cred["villa_id"] == "VC3"
+    assert p20_cred["lot_id"] == "P20"
+    assert p20_cred["owner_email"] == "torres.p20@gmail.com"
+    assert p20_cred["login_url"] == "https://vc3.lasvillas.club"
+    assert p20_cred["initial_password"].startswith("VC3-P20-")
 
     login_resp = await client.post(
         "/api/v1/auth/login",
-        json={"username": "U28", "password": u28_cred["initial_password"]},
+        json={"username": "P20", "password": p20_cred["initial_password"]},
     )
     assert login_resp.status_code == 200
     token_data = login_resp.json()
     assert token_data["expires_in_days"] == 30
-    assert token_data["lot_id"] == "U28"
+    assert token_data["villa_id"] == "VC3"
+    assert token_data["lot_id"] == "P20"
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +376,119 @@ async def test_password_spraying_blocks_attacker_ip_and_identifies_suspect_lot(
     assert sec_resp.status_code == 200
     reports = sec_resp.json()
     assert len(reports) == 1
+    assert reports[0]["villa_id"] == "VC3"
     assert reports[0]["ip_address"] == attacker_ip
     assert reports[0]["attack_type"] == AttackType.PASSWORD_SPRAYING
     assert reports[0]["attempted_usernames"] == ["B14", "U28", "P20"]
     assert reports[0]["suspected_lots_from_previous_logins"] == ["F08"]
+
+
+# ---------------------------------------------------------------------------
+# 9. MULTI-TENANT (VC3 vs VC2): Aislamiento total por llave compuesta (villa_id, lot_id)
+# ---------------------------------------------------------------------------
+async def test_multi_villa_isolation_between_vc3_and_vc2(
+    client: AsyncClient,
+    b14_headers: dict[str, str],
+) -> None:
+    # 1. En VC3, el lote B14 está al día y puede crear su pase
+    vc3_pass = await client.post(
+        "/api/v1/passes",
+        headers=b14_headers,
+        json={"pass_type": "DELIVERY"},
+    )
+    assert vc3_pass.status_code == 201
+    code_vc3 = vc3_pass.json()["code"]
+
+    # 2. En VC2 (vc2.lasvillas.club), el lote B14 es de otra familia y está en mora (False)
+    vc2_login = await client.post(
+        "/api/v1/auth/login",
+        headers={"X-Villa-Id": "VC2"},
+        json={"username": "B14", "password": "VC2-B14"},
+    )
+    assert vc2_login.status_code == 200
+    vc2_b14_token = vc2_login.json()["access_token"]
+
+    vc2_pass_attempt = await client.post(
+        "/api/v1/passes",
+        headers={
+            "Authorization": f"Bearer {vc2_b14_token}",
+            "X-Villa-Id": "VC2",
+        },
+        json={"pass_type": "DELIVERY"},
+    )
+    assert vc2_pass_attempt.status_code == 403
+
+    # 3. Un token de VC3 no puede operar si entra por el subdominio/header de VC2
+    cross_tenant_attempt = await client.post(
+        "/api/v1/passes",
+        headers={**b14_headers, "X-Villa-Id": "VC2"},
+        json={"pass_type": "TAXI"},
+    )
+    assert cross_tenant_attempt.status_code == 403
+    assert "pertenece a VC3" in cross_tenant_attempt.json()["detail"]
+
+    # 4. El guardia de VC2 no puede verificar un código generado en VC3
+    vc2_guard_token = create_access_token(
+        username="GUARDIA1", role=UserRole.GUARD, villa_id="VC2", lot_id=None
+    )
+    vc2_verify = await client.post(
+        "/api/v1/passes/verify",
+        headers={
+            "Authorization": f"Bearer {vc2_guard_token}",
+            "X-Villa-Id": "VC2",
+        },
+        json={"code": code_vc3, "visitor_dni": "45891230", "vehicle_plate": "ABC-123"},
+    )
+    assert vc2_verify.json()["authorized"] is False
+    assert "no existe en VC2" in vc2_verify.json()["message"]
+
+
+# ---------------------------------------------------------------------------
+# 10. PAGINACIÓN DE LOTES: page=0.., limit=50 por defecto y filtro opcional
+# ---------------------------------------------------------------------------
+async def test_lots_pagination_and_filtering(
+    client: AsyncClient,
+    admin_headers: dict[str, str],
+) -> None:
+    # Semilla en VC3 tiene 2 lotes: B14 (True) y F08 (False). Agregamos 3 más -> Total 5
+    await client.put(
+        "/api/v1/lots/bulk",
+        headers=admin_headers,
+        json={
+            "lots": [
+                {"lot_id": "A01", "owner_name": "Fam A01", "is_maintenance_up_to_date": True},
+                {"lot_id": "P20", "owner_name": "Fam P20", "is_maintenance_up_to_date": True},
+                {"lot_id": "U28", "owner_name": "Fam U28", "is_maintenance_up_to_date": False},
+            ]
+        },
+    )
+
+    # 1. Por defecto (page=0, limit=50): devuelve los 5 ordenados alfabéticamente
+    default_resp = await client.get("/api/v1/lots", headers=admin_headers)
+    assert default_resp.status_code == 200
+    body = default_resp.json()
+    assert body["total"] == 5
+    assert body["page"] == 0
+    assert body["limit"] == 50
+    assert body["total_pages"] == 1
+    assert body["has_next"] is False
+    assert [item["lot_id"] for item in body["items"]] == ["A01", "B14", "F08", "P20", "U28"]
+
+    # 2. Paginando de 2 en 2: page=0 (A01, B14), page=1 (F08, P20), page=2 (U28)
+    page0 = (await client.get("/api/v1/lots?page=0&limit=2", headers=admin_headers)).json()
+    assert [x["lot_id"] for x in page0["items"]] == ["A01", "B14"]
+    assert page0["total_pages"] == 3
+    assert page0["has_next"] is True
+
+    page2 = (await client.get("/api/v1/lots?page=2&limit=2", headers=admin_headers)).json()
+    assert [x["lot_id"] for x in page2["items"]] == ["U28"]
+    assert page2["has_next"] is False
+
+    # 3. Filtrando solo morosos (is_maintenance_up_to_date=false) -> F08 y U28
+    delinquents = (
+        await client.get(
+            "/api/v1/lots?is_maintenance_up_to_date=false", headers=admin_headers
+        )
+    ).json()
+    assert delinquents["total"] == 2
+    assert [x["lot_id"] for x in delinquents["items"]] == ["F08", "U28"]

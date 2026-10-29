@@ -3,9 +3,10 @@
 ### 1. Health Check
 GET {{baseUrl}}/healthz/liveness
 
-### 2. [AUTH] Vecino al día (B14) inicia sesión -> Token válido por 30 días
+### 2. [AUTH VC3] Vecino al día (VC3 + B14) inicia sesión en vc3.lasvillas.club
 # @name loginResidentB14
 POST {{baseUrl}}/api/v1/auth/login
+Host: vc3.lasvillas.club
 Content-Type: application/json
 X-Forwarded-For: 190.236.10.14
 
@@ -14,9 +15,10 @@ X-Forwarded-For: 190.236.10.14
   "password": "VC3-B14"
 }
 
-### 3. [AUTH] Vigilante de Garita inicia sesión (No tiene lote asignado)
+### 3. [AUTH VC3] Vigilante de Garita VC3 inicia sesión
 # @name loginGuard
 POST {{baseUrl}}/api/v1/auth/login
+Host: vc3.lasvillas.club
 Content-Type: application/json
 X-Forwarded-For: 181.65.20.10
 
@@ -25,9 +27,10 @@ X-Forwarded-For: 181.65.20.10
   "password": "guardia123"
 }
 
-### 4. [AUTH] Administrador inicia sesión
+### 4. [AUTH VC3] Administrador de la Junta Directiva VC3 inicia sesión
 # @name loginAdmin
 POST {{baseUrl}}/api/v1/auth/login
+Host: vc3.lasvillas.club
 Content-Type: application/json
 X-Forwarded-For: 181.65.20.99
 
@@ -36,9 +39,10 @@ X-Forwarded-For: 181.65.20.99
   "password": "admin123"
 }
 
-### 5. [VECINO B14] Crea un pase con 1 toque (No necesita mandar lot_id, sale de su JWT)
+### 5. [VECINO VC3+B14] Crea un pase con 1 toque (villa_id=VC3 y lot_id=B14 salen del JWT)
 # @name createPass
 POST {{baseUrl}}/api/v1/passes
+Host: vc3.lasvillas.club
 Authorization: Bearer {{loginResidentB14.response.body.access_token}}
 Content-Type: application/json
 X-Forwarded-For: 190.236.10.14
@@ -48,8 +52,9 @@ X-Forwarded-For: 190.236.10.14
   "visitor_info": "Uber Gris"
 }
 
-### 6. [GARITA] Vigilante verifica el QR/Código de 6 dígitos y registra DNI + Placa
+### 6. [GARITA VC3] Vigilante verifica el QR/Código de 6 dígitos y registra DNI + Placa
 POST {{baseUrl}}/api/v1/passes/verify
+Host: vc3.lasvillas.club
 Authorization: Bearer {{loginGuard.response.body.access_token}}
 Content-Type: application/json
 X-Forwarded-For: 181.65.20.10
@@ -60,8 +65,9 @@ X-Forwarded-For: 181.65.20.10
   "vehicle_plate": "B7J-412"
 }
 
-### 7. [ADMIN] Carga Masiva de Lotes (Upsert + Autogeneración de claves WhatsApp)
+### 7. [ADMIN VC3] Carga Masiva de Lotes con Correo Electrónico (Upsert + Onboarding)
 PUT {{baseUrl}}/api/v1/lots/bulk
+Host: vc3.lasvillas.club
 Authorization: Bearer {{loginAdmin.response.body.access_token}}
 Content-Type: application/json
 
@@ -70,21 +76,25 @@ Content-Type: application/json
     {
       "lot_id": "B14",
       "owner_name": "Jesus Plasencia",
+      "owner_email": "jesus.b14@lasvillas.club",
       "is_maintenance_up_to_date": true
     },
     {
       "lot_id": "U28",
       "owner_name": "Familia Salgado",
+      "owner_email": "salgado.u28@gmail.com",
       "is_maintenance_up_to_date": true
     },
     {
       "lot_id": "P20",
       "owner_name": "Familia Torres",
+      "owner_email": "torres.p20@gmail.com",
       "is_maintenance_up_to_date": true
     }
   ]
 }
 
-### 8. [ADMIN] Consultar IPs bloqueadas por Fuerza Bruta / Password Spraying y vecino sospechoso
+### 8. [ADMIN VC3] Consultar IPs bloqueadas en VC3 y vecino sospechoso
 GET {{baseUrl}}/api/v1/auth/security/blocked-ips
+Host: vc3.lasvillas.club
 Authorization: Bearer {{loginAdmin.response.body.access_token}}

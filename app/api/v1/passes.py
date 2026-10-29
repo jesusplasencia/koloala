@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request, status
 
 from app.core.audit import get_client_ip, get_user_agent
-from app.core.security import GuardOrAdminDep, ResidentLotDep
+from app.core.security import GuardOrAdminDep, ResidentIdentityDep
 from app.models.access import (
     CreatePassRequest,
     GatehouseVerificationResponse,
@@ -27,15 +27,17 @@ AccessServiceDep = Annotated[AccessService, Depends(get_access_service)]
 async def generate_access_pass(
     payload: CreatePassRequest,
     request: Request,
-    authenticated_lot_id: ResidentLotDep,
+    resident: ResidentIdentityDep,
     service: AccessServiceDep,
 ) -> GuestPass:
     """
     Usado por el residente autenticado para crear un código/QR temporal (Delivery, Taxi o Visita).
-    El lote se toma directamente del Token JWT del vecino (imposible falsificar otro lote).
+    Tanto la Villa (ej. VC3) como el Lote (ej. B14) se extraen directamente del Token JWT.
     """
+    assert resident.lot_id is not None
     return await service.create_pass(
-        authenticated_lot_id=authenticated_lot_id,
+        villa_id=resident.villa_id,
+        authenticated_lot_id=resident.lot_id,
         payload=payload,
         client_ip=get_client_ip(request),
         user_agent=get_user_agent(request),
@@ -50,10 +52,11 @@ async def verify_pass_at_gate(
     service: AccessServiceDep,
 ) -> GatehouseVerificationResponse:
     """
-    Usado por el vigilante en garita: valida el código/QR de 6 caracteres y cierra el registro
-    capturando obligatoriamente DNI + Placa del vehículo.
+    Usado por el vigilante en garita: valida el código/QR de 6 caracteres dentro de su Villa
+    y cierra el registro capturando DNI + Placa del vehículo.
     """
     return await service.verify_at_gatehouse(
+        villa_id=guard_identity.villa_id,
         payload=payload,
         guard_username=guard_identity.username,
         client_ip=get_client_ip(request),

@@ -18,6 +18,7 @@ class PassStatus(StrEnum):
 
 # --- Entidades de Dominio ---
 class GuestPass(BaseModel):
+    villa_id: str = Field(default="VC3", examples=["VC1", "VC2", "VC3"])
     code: str
     lot_id: str = Field(..., examples=["B14", "U28", "P20"])
     pass_type: PassType
@@ -41,7 +42,7 @@ class GuestPass(BaseModel):
 # --- Contratos HTTP (Request / Response) ---
 class CreatePassRequest(BaseModel):
     """
-    El residente autenticado ya NO envía lot_id (se toma de su Token JWT).
+    El residente autenticado ya NO envía villa_id ni lot_id (se toman de su Token JWT).
     Solo elige pass_type y opcionalmente una nota breve en visitor_info.
     """
 
@@ -80,6 +81,7 @@ class VerifyPassRequest(BaseModel):
 class GatehouseVerificationResponse(BaseModel):
     authorized: bool
     message: str
+    villa_id: str | None = None
     lot_id: str | None = None
     owner_name: str | None = None
     pass_type: PassType | None = None

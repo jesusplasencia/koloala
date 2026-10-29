@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.core.security import (
     AdminDep,
     CurrentIdentityDep,
+    VillaIdDep,
     create_access_token,
     hash_password,
     verify_password,
@@ -34,23 +35,24 @@ UserRepoDep = Annotated[UserRepositoryProtocol, Depends(get_user_repo)]
 async def login(
     payload: LoginRequest,
     request: Request,
+    villa_id: VillaIdDep,
     user_repo: UserRepoDep,
 ) -> TokenResponse:
     """
-    Autentica a residentes (ej. 'B14', 'U28'), vigilantes ('guardia1') o administrador ('admin').
-    Protegido contra Fuerza Bruta y Password Spraying: al 3er fallo desde la misma IP,
-    bloquea la IP e identifica si pertenece a algún vecino de la Villa.
+    Autentica a residentes (ej. 'B14', 'P20'), vigilantes ('guardia1') o administrador ('admin')
+    sectorizados por su Villa (detectada vía subdominio 'vc3.lasvillas.club' o 'X-Villa-Id').
     """
     client_ip = get_client_ip(request)
     user_agent = get_user_agent(request)
     norm_username = normalize_lot_id(payload.username)
+    actor_label = f"{villa_id}:{norm_username}"
 
-    # 1. Verificar si la IP del cliente ya se encuentra bloqueada
-    blocked_report = await user_repo.is_ip_blocked(client_ip)
+    # 1. Verificar si la IP del cliente ya se encuentra bloqueada en esta Villa
+    blocked_report = await user_repo.is_ip_blocked(villa_id, client_ip)
     if blocked_report:
         log_audit_event(
             event="AUTH_BLOCKED_IP_ATTEMPT",
-            actor=norm_username,
+            actor=actor_label,
             client_ip=client_ip,
             user_agent=user_agent,
             details=blocked_report.model_dump(mode="json"),
@@ -58,16 +60,17 @@ async def login(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                "Tu dirección IP ha sido bloqueada por actividad sospechosa "
+                f"Tu dirección IP ha sido bloqueada en {villa_id} por actividad sospechosa "
                 f"({blocked_report.attack_type}). Este incidente y tu IP ({client_ip}) "
-                "han sido reportados al Administrador de Villa Club 3."
+                f"han sido reportados a la Administración de {villa_id}."
             ),
         )
 
-    # 2. Buscar usuario y validar contraseña
-    user = await user_repo.get_user(norm_username)
+    # 2. Buscar usuario dentro de la Villa y validar contraseña
+    user = await user_repo.get_user(villa_id, norm_username)
     if not user or not verify_password(payload.password, user.password_hash):
         failure_report = await user_repo.record_login_failure(
+            villa_id=villa_id,
             attempted_username=norm_username,
             client_ip=client_ip,
             user_agent=user_agent,
@@ -76,7 +79,7 @@ async def login(
         if failure_report.is_blocked:
             log_audit_event(
                 event="SECURITY_IP_BLOCKED_BRUTE_FORCE",
-                actor=norm_username,
+                actor=actor_label,
                 client_ip=client_ip,
                 user_agent=user_agent,
                 details=failure_report.model_dump(mode="json"),
@@ -84,18 +87,19 @@ async def login(
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
-                    "Tu dirección IP ha sido bloqueada tras 3 intentos fallidos "
+                    f"Tu dirección IP ha sido bloqueada en {villa_id} tras 3 intentos fallidos "
                     f"({failure_report.attack_type}). Este incidente y tu IP ({client_ip}) "
-                    "han sido reportados al Administrador de Villa Club 3."
+                    f"han sido reportados a la Administración de {villa_id}."
                 ),
             )
 
         log_audit_event(
             event="AUTH_LOGIN_FAILED",
-            actor=norm_username,
+            actor=actor_label,
             client_ip=client_ip,
             user_agent=user_agent,
             details={
+                "villa_id": villa_id,
                 "attempt": failure_report.failed_attempts,
                 "max_attempts": settings.max_failed_attempts_per_ip,
                 "attempted_usernames": failure_report.attempted_usernames,
@@ -104,30 +108,36 @@ async def login(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=(
-                f"Credenciales inválidas (Intento {failure_report.failed_attempts} "
+                f"Credenciales inválidas en {villa_id} (Intento {failure_report.failed_attempts} "
                 f"de {settings.max_failed_attempts_per_ip})."
             ),
         )
 
     # 3. Login exitoso: guardar IP para correlación futura y emitir JWT de 30 días
-    await user_repo.record_login_success(user.username, client_ip)
+    await user_repo.record_login_success(user.villa_id, user.username, client_ip)
     token = create_access_token(
         username=user.username,
         role=user.role,
+        villa_id=user.villa_id,
         lot_id=user.lot_id,
     )
 
     log_audit_event(
         event="AUTH_LOGIN_SUCCESS",
-        actor=user.username,
+        actor=f"{user.villa_id}:{user.username}",
         client_ip=client_ip,
         user_agent=user_agent,
-        details={"role": str(user.role), "lot_id": user.lot_id},
+        details={
+            "villa_id": user.villa_id,
+            "role": str(user.role),
+            "lot_id": user.lot_id,
+        },
     )
 
     return TokenResponse(
         access_token=token,
         expires_in_days=settings.access_token_expire_minutes // (60 * 24),
+        villa_id=user.villa_id,
         username=user.username,
         role=user.role,
         lot_id=user.lot_id,
@@ -141,18 +151,15 @@ async def change_password(
     identity: CurrentIdentityDep,
     user_repo: UserRepoDep,
 ) -> dict[str, str]:
-    """
-    Opcional: Permite a los propietarios cambiar su contraseña inicial si lo desean.
-    (Las personas mayores pueden seguir usando su contraseña inicial sin caducidad).
-    """
     client_ip = get_client_ip(request)
     user_agent = get_user_agent(request)
+    actor_label = f"{identity.villa_id}:{identity.username}"
 
-    user = await user_repo.get_user(identity.username)
+    user = await user_repo.get_user(identity.villa_id, identity.username)
     if not user or not verify_password(payload.current_password, user.password_hash):
         log_audit_event(
             event="AUTH_PASSWORD_CHANGE_FAILED",
-            actor=identity.username,
+            actor=actor_label,
             client_ip=client_ip,
             user_agent=user_agent,
         )
@@ -161,10 +168,12 @@ async def change_password(
             detail="La contraseña actual ingresada no es correcta.",
         )
 
-    await user_repo.update_password(identity.username, hash_password(payload.new_password))
+    await user_repo.update_password(
+        identity.villa_id, identity.username, hash_password(payload.new_password)
+    )
     log_audit_event(
         event="AUTH_PASSWORD_CHANGED",
-        actor=identity.username,
+        actor=actor_label,
         client_ip=client_ip,
         user_agent=user_agent,
     )
@@ -173,14 +182,13 @@ async def change_password(
 
 @router.get("/security/blocked-ips", response_model=list[BlockedIPReport])
 async def list_blocked_ips(
-    _admin: AdminDep,
+    admin: AdminDep,
     user_repo: UserRepoDep,
 ) -> list[BlockedIPReport]:
     """
-    [SOLO ADMIN] Muestra todas las IPs bloqueadas por Fuerza Bruta o Password Spraying,
-    incluyendo qué lotes de la Villa iniciaron sesión antes desde esa misma IP.
+    [SOLO ADMIN] Lista las IPs bloqueadas exclusivamente dentro de la Villa del Administrador.
     """
-    return await user_repo.list_blocked_ips()
+    return await user_repo.list_blocked_ips(admin.villa_id)
 
 
 @router.delete("/security/blocked-ips/{ip_address}")
@@ -190,18 +198,20 @@ async def unblock_ip(
     admin: AdminDep,
     user_repo: UserRepoDep,
 ) -> dict[str, str]:
-    """[SOLO ADMIN] Desbloquea una dirección IP bloqueada."""
-    unblocked = await user_repo.unblock_ip(ip_address)
+    """[SOLO ADMIN] Desbloquea una dirección IP dentro de su Villa."""
+    unblocked = await user_repo.unblock_ip(admin.villa_id, ip_address)
     if not unblocked:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"La IP '{ip_address}' no se encuentra en la lista de bloqueos.",
+            detail=f"La IP '{ip_address}' no se encuentra bloqueada en {admin.villa_id}.",
         )
     log_audit_event(
         event="SECURITY_IP_UNBLOCKED",
-        actor=admin.username,
+        actor=f"{admin.villa_id}:{admin.username}",
         client_ip=get_client_ip(request),
         user_agent=get_user_agent(request),
-        details={"unblocked_ip": ip_address},
+        details={"villa_id": admin.villa_id, "unblocked_ip": ip_address},
     )
-    return {"message": f"La dirección IP {ip_address} ha sido desbloqueada."}
+    return {
+        "message": f"La dirección IP {ip_address} ha sido desbloqueada en {admin.villa_id}."
+    }
