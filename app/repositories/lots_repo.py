@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Protocol
 
-from app.models.lot import BulkLotItem, PropertyLot
+from app.models.lot import BulkLotItem, PropertyLot, normalize_lot_id
 
 
 class LotRepositoryProtocol(Protocol):
@@ -15,26 +15,26 @@ class LotRepositoryProtocol(Protocol):
     ) -> PropertyLot | None: ...
     async def upsert_bulk_lots(
         self, items: list[BulkLotItem]
-    ) -> tuple[int, int, list[PropertyLot]]: ...
+    ) -> tuple[int, int, list[PropertyLot], list[str]]: ...
 
 
 class InMemoryLotRepository:
     def __init__(self, lots_store: dict[str, PropertyLot] | None = None) -> None:
         now = datetime.now(UTC)
-        # Si nos pasan un diccionario externo lo compartimos; si no, inicializamos el padrón semilla
+        # Datos semilla en el formato oficial corto de Villa Club 3: B14 y F08
         if lots_store is not None:
             self._lots = lots_store
         else:
             self._lots = {
-                "MZ-B-L14": PropertyLot(
-                    lot_id="MZ-B-L14",
+                "B14": PropertyLot(
+                    lot_id="B14",
                     owner_name="Jesus Plasencia",
                     is_maintenance_up_to_date=True,
                     created_at=now,
                     updated_at=now,
                 ),
-                "MZ-F-L08": PropertyLot(
-                    lot_id="MZ-F-L08",
+                "F08": PropertyLot(
+                    lot_id="F08",
                     owner_name="Vecino Moroso",
                     is_maintenance_up_to_date=False,
                     created_at=now,
@@ -47,7 +47,7 @@ class InMemoryLotRepository:
         return self._lots
 
     async def get_lot(self, lot_id: str) -> PropertyLot | None:
-        return self._lots.get(lot_id.upper())
+        return self._lots.get(normalize_lot_id(lot_id))
 
     async def list_lots(self) -> list[PropertyLot]:
         return list(self._lots.values())
@@ -58,7 +58,7 @@ class InMemoryLotRepository:
         is_maintenance_up_to_date: bool,
         owner_name: str | None = None,
     ) -> PropertyLot | None:
-        normalized_id = lot_id.upper()
+        normalized_id = normalize_lot_id(lot_id)
         lot = self._lots.get(normalized_id)
         if not lot:
             return None
@@ -71,14 +71,15 @@ class InMemoryLotRepository:
 
     async def upsert_bulk_lots(
         self, items: list[BulkLotItem]
-    ) -> tuple[int, int, list[PropertyLot]]:
+    ) -> tuple[int, int, list[PropertyLot], list[str]]:
         now = datetime.now(UTC)
         created_count = 0
         updated_count = 0
         processed: list[PropertyLot] = []
+        newly_created_lot_ids: list[str] = []
 
         for item in items:
-            normalized_id = item.lot_id.upper()
+            normalized_id = normalize_lot_id(item.lot_id)
             existing = self._lots.get(normalized_id)
             if existing:
                 existing.owner_name = item.owner_name
@@ -96,9 +97,10 @@ class InMemoryLotRepository:
                 )
                 self._lots[normalized_id] = new_lot
                 processed.append(new_lot)
+                newly_created_lot_ids.append(normalized_id)
                 created_count += 1
 
-        return created_count, updated_count, processed
+        return created_count, updated_count, processed, newly_created_lot_ids
 
 
 # Instancia singleton del padrón de lotes en memoria

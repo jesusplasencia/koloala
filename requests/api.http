@@ -3,66 +3,88 @@
 ### 1. Health Check
 GET {{baseUrl}}/healthz/liveness
 
-### 2. Caso Exitoso: Propietario al día (MZ-B-L14) pide un Taxi
+### 2. [AUTH] Vecino al día (B14) inicia sesión -> Token válido por 30 días
+# @name loginResidentB14
+POST {{baseUrl}}/api/v1/auth/login
+Content-Type: application/json
+X-Forwarded-For: 190.236.10.14
+
+{
+  "username": "B14",
+  "password": "VC3-B14"
+}
+
+### 3. [AUTH] Vigilante de Garita inicia sesión (No tiene lote asignado)
+# @name loginGuard
+POST {{baseUrl}}/api/v1/auth/login
+Content-Type: application/json
+X-Forwarded-For: 181.65.20.10
+
+{
+  "username": "guardia1",
+  "password": "guardia123"
+}
+
+### 4. [AUTH] Administrador inicia sesión
+# @name loginAdmin
+POST {{baseUrl}}/api/v1/auth/login
+Content-Type: application/json
+X-Forwarded-For: 181.65.20.99
+
+{
+  "username": "admin",
+  "password": "admin123"
+}
+
+### 5. [VECINO B14] Crea un pase con 1 toque (No necesita mandar lot_id, sale de su JWT)
 # @name createPass
 POST {{baseUrl}}/api/v1/passes
+Authorization: Bearer {{loginResidentB14.response.body.access_token}}
 Content-Type: application/json
+X-Forwarded-For: 190.236.10.14
 
 {
-  "lot_id": "MZ-B-L14",
   "pass_type": "TAXI",
-  "visitor_info": "Uber Gris - Placa B7J-412"
+  "visitor_info": "Uber Gris"
 }
 
-### 3. Caso Bloqueado (403): Vecino Moroso (MZ-F-L08) intenta pedir Delivery
-POST {{baseUrl}}/api/v1/passes
-Content-Type: application/json
-
-{
-  "lot_id": "MZ-F-L08",
-  "pass_type": "DELIVERY",
-  "visitor_info": "PedidosYa - Motorizado"
-}
-
-### 4. Garita verifica el código generado en el paso 2 (Toma el código automáticamente)
+### 6. [GARITA] Vigilante verifica el QR/Código de 6 dígitos y registra DNI + Placa
 POST {{baseUrl}}/api/v1/passes/verify
+Authorization: Bearer {{loginGuard.response.body.access_token}}
 Content-Type: application/json
+X-Forwarded-For: 181.65.20.10
 
 {
-  "code": "{{createPass.response.body.code}}"
+  "code": "{{createPass.response.body.code}}",
+  "visitor_dni": "45891230",
+  "vehicle_plate": "B7J-412"
 }
 
-### 5. [ADMIN] Listar todos los lotes del padrón y su estado de mantenimiento
-GET {{baseUrl}}/api/v1/lots
-
-### 6. [ADMIN] Editar un lote individual (Ej: MZ-F-L08 paga su deuda por Yape)
-PATCH {{baseUrl}}/api/v1/lots/MZ-F-L08/maintenance
-Content-Type: application/json
-
-{
-  "is_maintenance_up_to_date": true
-}
-
-### 7. [ADMIN] Carga/Sincronización Masiva (Bulk Upsert de cierre de mes)
+### 7. [ADMIN] Carga Masiva de Lotes (Upsert + Autogeneración de claves WhatsApp)
 PUT {{baseUrl}}/api/v1/lots/bulk
+Authorization: Bearer {{loginAdmin.response.body.access_token}}
 Content-Type: application/json
 
 {
   "lots": [
     {
-      "lot_id": "MZ-B-L14",
+      "lot_id": "B14",
       "owner_name": "Jesus Plasencia",
       "is_maintenance_up_to_date": true
     },
     {
-      "lot_id": "MZ-F-L08",
-      "owner_name": "Vecino Moroso",
-      "is_maintenance_up_to_date": false
+      "lot_id": "U28",
+      "owner_name": "Familia Salgado",
+      "is_maintenance_up_to_date": true
     },
     {
-      "lot_id": "MZ-P-L20",
+      "lot_id": "P20",
       "owner_name": "Familia Torres",
       "is_maintenance_up_to_date": true
     }
   ]
 }
+
+### 8. [ADMIN] Consultar IPs bloqueadas por Fuerza Bruta / Password Spraying y vecino sospechoso
+GET {{baseUrl}}/api/v1/auth/security/blocked-ips
+Authorization: Bearer {{loginAdmin.response.body.access_token}}

@@ -8,6 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+.env
+
+# Audit logs (rotated hourly to S3 in production)
+logs/
 
 # REST Client private environment files
 *.private.http

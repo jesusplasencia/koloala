@@ -1,7 +1,7 @@
 from typing import Protocol
 
 from app.models.access import GuestPass
-from app.models.lot import PropertyLot
+from app.models.lot import PropertyLot, normalize_lot_id
 from app.repositories.lots_repo import in_memory_lot_repo
 
 
@@ -21,7 +21,7 @@ class InMemoryAccessRepository:
         self._passes: dict[str, GuestPass] = {}
 
     async def get_lot(self, lot_id: str) -> PropertyLot | None:
-        return self._lots.get(lot_id.upper())
+        return self._lots.get(normalize_lot_id(lot_id))
 
     async def save_pass(self, guest_pass: GuestPass) -> GuestPass:
         self._passes[guest_pass.code.upper()] = guest_pass
