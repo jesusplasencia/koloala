@@ -1,12 +1,7 @@
 from datetime import UTC, datetime
 from typing import Protocol
 
-from app.models.lot import (
-    BulkLotItem,
-    PropertyLot,
-    normalize_lot_id,
-    normalize_villa_id,
-)
+from app.models.lot import BulkLotItem, PropertyLot, normalize_lot_id, normalize_villa_id
 
 
 class LotRepositoryProtocol(Protocol):
@@ -24,6 +19,7 @@ class LotRepositoryProtocol(Protocol):
         lot_id: str,
         is_maintenance_up_to_date: bool,
         owner_name: str | None = None,
+        owner_phone: str | None = None,
         owner_email: str | None = None,
     ) -> PropertyLot | None: ...
     async def upsert_bulk_lots(
@@ -45,6 +41,7 @@ class InMemoryLotRepository:
                     villa_id="VC3",
                     lot_id="B14",
                     owner_name="Jesus Plasencia",
+                    owner_phone="999888777",
                     owner_email="jesus.b14@lasvillas.club",
                     is_maintenance_up_to_date=True,
                     created_at=now,
@@ -54,16 +51,17 @@ class InMemoryLotRepository:
                     villa_id="VC3",
                     lot_id="F08",
                     owner_name="Vecino Moroso",
-                    owner_email="vecino.f08@lasvillas.club",
+                    owner_phone="999111222",
+                    owner_email=None,
                     is_maintenance_up_to_date=False,
                     created_at=now,
                     updated_at=now,
                 ),
-                # En Villa Club 2 (VC2), el lote B14 pertenece a otra familia y está en mora
                 ("VC2", "B14"): PropertyLot(
                     villa_id="VC2",
                     lot_id="B14",
                     owner_name="Propietario VC2 B14",
+                    owner_phone="988777666",
                     owner_email="vc2.b14@lasvillas.club",
                     is_maintenance_up_to_date=False,
                     created_at=now,
@@ -96,7 +94,6 @@ class InMemoryLotRepository:
                 or lot.is_maintenance_up_to_date == is_maintenance_up_to_date
             )
         ]
-        # Orden determinístico por lot_id (A01, B14, F08, P20...) esencial para paginación
         filtered.sort(key=lambda x: x.lot_id)
         total = len(filtered)
         offset = page * limit
@@ -109,6 +106,7 @@ class InMemoryLotRepository:
         lot_id: str,
         is_maintenance_up_to_date: bool,
         owner_name: str | None = None,
+        owner_phone: str | None = None,
         owner_email: str | None = None,
     ) -> PropertyLot | None:
         key = (normalize_villa_id(villa_id), normalize_lot_id(lot_id))
@@ -119,6 +117,8 @@ class InMemoryLotRepository:
         lot.is_maintenance_up_to_date = is_maintenance_up_to_date
         if owner_name is not None:
             lot.owner_name = owner_name
+        if owner_phone is not None:
+            lot.owner_phone = owner_phone
         if owner_email is not None:
             lot.owner_email = owner_email
         lot.updated_at = datetime.now(UTC)
@@ -140,6 +140,8 @@ class InMemoryLotRepository:
             existing = self._lots.get(key)
             if existing:
                 existing.owner_name = item.owner_name
+                if item.owner_phone is not None:
+                    existing.owner_phone = item.owner_phone
                 if item.owner_email is not None:
                     existing.owner_email = item.owner_email
                 existing.is_maintenance_up_to_date = item.is_maintenance_up_to_date
@@ -151,6 +153,7 @@ class InMemoryLotRepository:
                     villa_id=norm_villa,
                     lot_id=normalized_id,
                     owner_name=item.owner_name,
+                    owner_phone=item.owner_phone,
                     owner_email=item.owner_email,
                     is_maintenance_up_to_date=item.is_maintenance_up_to_date,
                     created_at=now,

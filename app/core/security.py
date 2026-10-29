@@ -64,13 +64,16 @@ def verify_password(plain_password: str, stored_hash: str) -> bool:
         return False
 
 
-def generate_initial_lot_password(villa_id: str, lot_id: str) -> str:
+def generate_initial_lot_password() -> str:
     """
-    Genera una contraseña inicial fácil de leer por WhatsApp/Email para propietarios
-    (incluyendo adultos mayores), ej: 'VC3-P20-8492'.
+    Genera una contraseña numérica criptográfica de 8 dígitos (100 millones de combinaciones).
+    El primer dígito es entre 1-9 para evitar que Excel recorte ceros a la izquierda.
+    Combinada con el bloqueo de IP al 3er fallo, es impenetrable por fuerza bruta y
+    sumamente amigable para propietarios de 30 a 80 años en teclado móvil.
     """
-    digits = "".join(secrets.choice(string.digits) for _ in range(4))
-    return f"{villa_id.upper()}-{lot_id.upper()}-{digits}"
+    first_digit = secrets.choice("123456789")
+    rest_digits = "".join(secrets.choice(string.digits) for _ in range(7))
+    return f"{first_digit}{rest_digits}"
 
 
 def _b64url_encode(data: bytes) -> str:

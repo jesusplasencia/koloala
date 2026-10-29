@@ -7,6 +7,7 @@ from app.core.security import AdminDep
 from app.models.lot import (
     BulkUpsertLotsRequest,
     BulkUpsertLotsResponse,
+    GeneratedLotCredential,
     PaginatedLotsResponse,
     PropertyLot,
     UpdateLotMaintenanceRequest,
@@ -81,11 +82,31 @@ async def update_single_lot_maintenance(
     admin: AdminDep,
     service: LotsServiceDep,
 ) -> PropertyLot:
-    """[SOLO ADMIN] Habilita o pasa a mora un lote individual dentro de su Villa."""
+    """[SOLO ADMIN] Habilita o pasa a mora un lote individual (y opcionalmente actualiza teléfono/email)."""
     return await service.update_lot_maintenance(
         villa_id=admin.villa_id,
         lot_id=lot_id,
         payload=payload,
+        actor=admin.username,
+        client_ip=get_client_ip(request),
+        user_agent=get_user_agent(request),
+    )
+
+
+@router.post("/{lot_id}/reset-password", response_model=GeneratedLotCredential)
+async def reset_lot_resident_password(
+    lot_id: str,
+    request: Request,
+    admin: AdminDep,
+    service: LotsServiceDep,
+) -> GeneratedLotCredential:
+    """
+    [SOLO ADMIN] Genera una nueva contraseña numérica de 8 dígitos para un lote
+    (ideal cuando un vecino olvida su clave o cambia de celular) y devuelve el link de WhatsApp.
+    """
+    return await service.reset_lot_password(
+        villa_id=admin.villa_id,
+        lot_id=lot_id,
         actor=admin.username,
         client_ip=get_client_ip(request),
         user_agent=get_user_agent(request),
@@ -100,8 +121,8 @@ async def bulk_sync_lots(
     service: LotsServiceDep,
 ) -> BulkUpsertLotsResponse:
     """
-    [SOLO ADMIN] Carga o actualiza en bloque la lista de lotes de la Villa del Administrador.
-    Para cada lote nuevo, autogenera su usuario, clave inicial y URL (ej. https://vc3.lasvillas.club).
+    [SOLO ADMIN] Carga o actualiza en bloque la lista de lotes de la Villa (con teléfono y/o email opcionales).
+    Para cada lote nuevo, autogenera su clave de 8 dígitos y link directo de WhatsApp (wa.me).
     """
     return await service.bulk_upsert_lots(
         villa_id=admin.villa_id,

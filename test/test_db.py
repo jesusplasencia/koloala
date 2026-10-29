@@ -272,7 +272,7 @@ async def test_pass_denied_if_admin_marks_lot_delinquent_before_arrival(
 
 
 # ---------------------------------------------------------------------------
-# 7. ADMIN BULK SYNC: Crea nuevos lotes con email (VC3+P20) y autogenera claves
+# 7. ADMIN BULK SYNC & RESET: Clave de 8 dígitos, Link WhatsApp y Reset Admin
 # ---------------------------------------------------------------------------
 async def test_admin_bulk_upsert_generates_credentials_and_allows_login(
     client: AsyncClient,
@@ -286,12 +286,13 @@ async def test_admin_bulk_upsert_generates_credentials_and_allows_login(
                 {
                     "lot_id": "F08",
                     "owner_name": "Vecino Ya Pagó",
-                    "owner_email": "f08@lasvillas.club",
+                    "owner_phone": "999111222",
                     "is_maintenance_up_to_date": True,
                 },
                 {
                     "lot_id": "P20",
                     "owner_name": "Familia Torres",
+                    "owner_phone": "987 654 321",
                     "owner_email": "torres.p20@gmail.com",
                     "is_maintenance_up_to_date": True,
                 },
@@ -311,8 +312,11 @@ async def test_admin_bulk_upsert_generates_credentials_and_allows_login(
     assert p20_cred["lot_id"] == "P20"
     assert p20_cred["owner_email"] == "torres.p20@gmail.com"
     assert p20_cred["login_url"] == "https://vc3.lasvillas.club"
-    assert p20_cred["initial_password"].startswith("VC3-P20-")
+    assert len(p20_cred["initial_password"]) == 8
+    assert p20_cred["initial_password"].isdigit()
+    assert p20_cred["whatsapp_share_url"].startswith("https://wa.me/51987654321?text=")
 
+    # El vecino inicia sesión con su contraseña numérica de 8 dígitos
     login_resp = await client.post(
         "/api/v1/auth/login",
         json={"username": "P20", "password": p20_cred["initial_password"]},
@@ -322,6 +326,24 @@ async def test_admin_bulk_upsert_generates_credentials_and_allows_login(
     assert token_data["expires_in_days"] == 30
     assert token_data["villa_id"] == "VC3"
     assert token_data["lot_id"] == "P20"
+
+    # Si luego el vecino olvida su clave, el Admin la resetea en 1 clic
+    reset_resp = await client.post(
+        "/api/v1/lots/P20/reset-password",
+        headers=admin_headers,
+    )
+    assert reset_resp.status_code == 200
+    reset_cred = reset_resp.json()
+    assert len(reset_cred["initial_password"]) == 8
+    assert reset_cred["initial_password"].isdigit()
+    assert reset_cred["initial_password"] != p20_cred["initial_password"]
+
+    # Y la nueva clave de 8 dígitos funciona de inmediato
+    relogin_resp = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "P20", "password": reset_cred["initial_password"]},
+    )
+    assert relogin_resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------

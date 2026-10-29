@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from urllib.parse import quote
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -24,6 +25,39 @@ def normalize_lot_id(raw_lot_id: str) -> str:
     return cleaned
 
 
+def normalize_peru_phone(raw_phone: str | None) -> str | None:
+    """
+    Limpia el número de celular (ej. '987 654 321' o '+51987654321' -> '51987654321')
+    para generar enlaces directos de WhatsApp (wa.me).
+    """
+    if not raw_phone:
+        return None
+    digits = re.sub(r"\D", "", raw_phone)
+    if not digits:
+        return None
+    if len(digits) == 9 and digits.startswith("9"):
+        return f"51{digits}"
+    return digits
+
+
+def build_whatsapp_onboarding_url(
+    phone: str | None,
+    villa_id: str,
+    lot_id: str,
+    password: str,
+    login_url: str,
+) -> str | None:
+    norm_phone = normalize_peru_phone(phone)
+    if not norm_phone:
+        return None
+    message = (
+        f"Hola vecino del lote {lot_id} ({villa_id}). "
+        f"Ya está activo tu acceso rápido a garita en {login_url} | "
+        f"Usuario: {lot_id} | Contraseña: {password}"
+    )
+    return f"https://wa.me/{norm_phone}?text={quote(message)}"
+
+
 # --- Entidad de Dominio: Lote Físico con Llave Compuesta (villa_id, lot_id) ---
 class PropertyLot(BaseModel):
     villa_id: str = Field(
@@ -37,10 +71,15 @@ class PropertyLot(BaseModel):
         description="Identificador corto Manzana y Lote (parte 2 de la llave compuesta)",
     )
     owner_name: str = Field(default="Propietario")
+    owner_phone: str | None = Field(
+        default=None,
+        examples=["987654321"],
+        description="Celular (WhatsApp) del propietario (opcional)",
+    )
     owner_email: str | None = Field(
         default=None,
         examples=["vecino.p20@gmail.com"],
-        description="Correo electrónico del propietario para envío de accesos y notificaciones",
+        description="Correo electrónico del propietario (opcional)",
     )
     is_maintenance_up_to_date: bool
     created_at: datetime
@@ -72,6 +111,11 @@ class UpdateLotMaintenanceRequest(BaseModel):
         max_length=100,
         description="Opcional: actualizar el nombre del propietario",
     )
+    owner_phone: str | None = Field(
+        default=None,
+        max_length=30,
+        description="Opcional: actualizar el celular/WhatsApp del propietario",
+    )
     owner_email: str | None = Field(
         default=None,
         max_length=150,
@@ -93,11 +137,17 @@ class BulkLotItem(BaseModel):
         max_length=100,
         examples=["Jesus Plasencia"],
     )
+    owner_phone: str | None = Field(
+        default=None,
+        max_length=30,
+        examples=["987654321"],
+        description="Opcional: celular de WhatsApp del propietario",
+    )
     owner_email: str | None = Field(
         default=None,
         max_length=150,
         examples=["vecino.p20@gmail.com"],
-        description="Correo electrónico del propietario para el onboarding masivo",
+        description="Opcional: correo electrónico del propietario",
     )
     is_maintenance_up_to_date: bool
 
@@ -119,15 +169,22 @@ class GeneratedLotCredential(BaseModel):
     villa_id: str
     lot_id: str
     username: str
+    owner_name: str = "Propietario"
+    owner_phone: str | None = None
     owner_email: str | None = None
     initial_password: str = Field(
         ...,
-        description="Contraseña inicial autogenerada para enviar por Email/WhatsApp",
+        examples=["48291057"],
+        description="Contraseña numérica de 8 dígitos autogenerada (fácil para adultos mayores y segura con bloqueo de IP)",
     )
     login_url: str = Field(
         ...,
         examples=["https://vc3.lasvillas.club"],
         description="URL del portal correspondiente a la Villa del vecino",
+    )
+    whatsapp_share_url: str | None = Field(
+        default=None,
+        description="Link directo wa.me con mensaje pre-armado si el lote cuenta con owner_phone",
     )
 
 
@@ -148,6 +205,12 @@ class PaginatedLotsResponse(BaseModel):
     items: list[PropertyLot]
     total: int = Field(..., description="Total de lotes registrados en la Villa")
     page: int = Field(..., ge=0, description="Índice de página actual (0-indexed)")
-    limit: int = Field(..., ge=1, le=100, description="Cantidad máxima de lotes por página")
-    total_pages: int = Field(..., ge=0, description="Cantidad total de páginas disponibles")
-    has_next: bool = Field(..., description="True si existen más páginas después de la actual")
+    limit: int = Field(
+        ..., ge=1, le=100, description="Cantidad máxima de lotes por página"
+    )
+    total_pages: int = Field(
+        ..., ge=0, description="Cantidad total de páginas disponibles"
+    )
+    has_next: bool = Field(
+        ..., description="True si existen más páginas después de la actual"
+    )
