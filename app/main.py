@@ -1,19 +1,44 @@
 import copy
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import HTMLResponse
 
 from app.api.v1.auth import router as auth_router
 from app.api.v1.lots import router as lots_router
 from app.api.v1.passes import router as passes_router
+from app.core.audit import flush_audit_logs_on_shutdown
 from app.core.config import settings
+from app.db.session import check_db_readiness, dispose_db_engine
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """
+    Maneja el ciclo de vida del contenedor en AWS ECS Fargate (SIGTERM) y en local (Ctrl+C).
+    Al iniciar (startup) prepara recursos; al apagarse (shutdown), cierra el pool de PostgreSQL
+    y fuerza el volcado, compresión (.gz) y subida a S3 de cualquier log de auditoría pendiente.
+    """
+    import logging
+
+    logger = logging.getLogger("uvicorn.error")
+    logger.info("[Koloala Lifespan] Motor de Garita iniciado correctamente.")
+    yield
+    logger.info(
+        "[Koloala Lifespan] Señal de apagado (SIGINT/SIGTERM) detectada. Cerrando DB y asegurando audit logs..."
+    )
+    await dispose_db_engine()
+    flush_audit_logs_on_shutdown()
+
 
 app = FastAPI(
     title=settings.app_name,
     version="1.0.0",
     description="API for Koloala, core service for high-throughput containerized workloads.",
     docs_url=None,  # Personalizado abajo con StandaloneLayout + Selector de Definiciones
+    lifespan=lifespan,
 )
 
 app.include_router(auth_router, prefix=settings.api_v1_prefix)
@@ -158,3 +183,21 @@ async def root():
 @app.get("/healthz/liveness")
 async def liveness():
     return {"status": "ok"}
+
+
+@app.get("/healthz/readiness")
+async def readiness():
+    """
+    Readiness probe para AWS ALB / ECS Fargate: verifica que el pool de conexiones
+    hacia PostgreSQL responda correctamente antes de enviar tráfico de garita.
+    """
+    is_ready = await check_db_readiness()
+    if not is_ready:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database connection pool is not ready.",
+        )
+    return {
+        "status": "ready",
+        "database_backend": "postgresql" if settings.use_postgres else "in_memory",
+    }

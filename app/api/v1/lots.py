@@ -1,9 +1,13 @@
+from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
 
 from app.core.audit import get_client_ip, get_user_agent
+from app.core.config import settings
 from app.core.security import AdminDep
+from app.db.repositories import PostgresLotRepository, PostgresUserRepository
+from app.db.session import AsyncSessionLocal
 from app.models.lot import (
     BulkUpsertLotsRequest,
     BulkUpsertLotsResponse,
@@ -19,8 +23,21 @@ from app.services.lots_service import LotsService
 router = APIRouter(prefix="/lots", tags=["Maintenance of Lots"])
 
 
-def get_lots_service() -> LotsService:
-    return LotsService(repo=in_memory_lot_repo, user_repo=in_memory_user_repo)
+async def get_lots_service() -> AsyncIterator[LotsService]:
+    if not settings.use_postgres:
+        yield LotsService(repo=in_memory_lot_repo, user_repo=in_memory_user_repo)
+        return
+    # Unit of Work: LotRepository y UserRepository comparten la misma transacción atómica
+    async with AsyncSessionLocal() as session:
+        try:
+            yield LotsService(
+                repo=PostgresLotRepository(session),
+                user_repo=PostgresUserRepository(session),
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 LotsServiceDep = Annotated[LotsService, Depends(get_lots_service)]

@@ -1,9 +1,13 @@
+from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, status
 
 from app.core.audit import get_client_ip, get_user_agent
+from app.core.config import settings
 from app.core.security import GuardOrAdminDep, ResidentIdentityDep
+from app.db.repositories import PostgresAccessRepository
+from app.db.session import AsyncSessionLocal
 from app.models.access import (
     CreatePassRequest,
     GatehouseVerificationResponse,
@@ -16,8 +20,17 @@ from app.services.access_service import AccessService
 router = APIRouter(prefix="/passes", tags=["Gatehouse Passes"])
 
 
-def get_access_service() -> AccessService:
-    return AccessService(repo=in_memory_repo)
+async def get_access_service() -> AsyncIterator[AccessService]:
+    if not settings.use_postgres:
+        yield AccessService(repo=in_memory_repo)
+        return
+    async with AsyncSessionLocal() as session:
+        try:
+            yield AccessService(repo=PostgresAccessRepository(session))
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 AccessServiceDep = Annotated[AccessService, Depends(get_access_service)]

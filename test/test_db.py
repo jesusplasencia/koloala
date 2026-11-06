@@ -404,6 +404,26 @@ async def test_password_spraying_blocks_attacker_ip_and_identifies_suspect_lot(
     assert reports[0]["attempted_usernames"] == ["B14", "U28", "P20"]
     assert reports[0]["suspected_lots_from_previous_logins"] == ["F08"]
 
+    # 5. El Administrador desbloquea la IP (vía UPDATE de estado, sin perder correlación de F08)
+    unblock_resp = await client.delete(
+        f"/api/v1/auth/security/blocked-ips/{attacker_ip}",
+        headers=admin_headers,
+    )
+    assert unblock_resp.status_code == 200
+
+    # La lista de IPs bloqueadas queda vacía y F08 puede volver a autenticarse desde su IP
+    sec_after = await client.get(
+        "/api/v1/auth/security/blocked-ips", headers=admin_headers
+    )
+    assert sec_after.json() == []
+
+    login_after_unblock = await client.post(
+        "/api/v1/auth/login",
+        headers=attacker_headers,
+        json={"username": "F08", "password": "VC3-F08"},
+    )
+    assert login_after_unblock.status_code == 200
+
 
 # ---------------------------------------------------------------------------
 # 9. MULTI-TENANT (VC3 vs VC2): Aislamiento total por llave compuesta (villa_id, lot_id)

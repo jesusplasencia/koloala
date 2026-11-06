@@ -265,10 +265,14 @@ class InMemoryUserRepository:
 
     async def unblock_ip(self, villa_id: str, client_ip: str) -> bool:
         ip_key = (normalize_villa_id(villa_id), client_ip)
-        if ip_key in self._ip_tracking:
-            del self._ip_tracking[ip_key]
-            return True
-        return False
+        state = self._ip_tracking.get(ip_key)
+        if not state or not state.is_blocked:
+            return False
+        state.is_blocked = False
+        state.failed_attempts = 0
+        state.attempted_usernames = []
+        state.blocked_at = None
+        return True
 
 
 in_memory_user_repo = InMemoryUserRepository()

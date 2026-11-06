@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -12,6 +13,8 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
+from app.db.repositories import PostgresUserRepository
+from app.db.session import AsyncSessionLocal
 from app.models.lot import normalize_lot_id
 from app.models.user import (
     BlockedIPReport,
@@ -24,8 +27,17 @@ from app.repositories.users_repo import UserRepositoryProtocol, in_memory_user_r
 router = APIRouter(prefix="/auth", tags=["Authentication & Security"])
 
 
-def get_user_repo() -> UserRepositoryProtocol:
-    return in_memory_user_repo
+async def get_user_repo() -> AsyncIterator[UserRepositoryProtocol]:
+    if not settings.use_postgres:
+        yield in_memory_user_repo
+        return
+    async with AsyncSessionLocal() as session:
+        try:
+            yield PostgresUserRepository(session)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 UserRepoDep = Annotated[UserRepositoryProtocol, Depends(get_user_repo)]
