@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, JSON, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -18,7 +18,9 @@ class PropertyLotORM(Base):
 
     villa_id: Mapped[str] = mapped_column(String(15), primary_key=True)
     lot_id: Mapped[str] = mapped_column(String(15), primary_key=True)
-    owner_name: Mapped[str] = mapped_column(String(100), nullable=False, default="Propietario")
+    owner_name: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="Propietario"
+    )
     owner_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
     owner_email: Mapped[str | None] = mapped_column(String(150), nullable=True)
     is_maintenance_up_to_date: Mapped[bool] = mapped_column(

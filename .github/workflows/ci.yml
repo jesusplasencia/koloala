@@ -1,0 +1,86 @@
+name: Koloala CI (Quality, Postgres Migrations & Docker Smoke Test)
+
+on:
+  push:
+    branches: ["main", "dev"]
+  pull_request:
+    branches: ["main", "dev"]
+
+jobs:
+  # ===========================================================================
+  # JOB 1: Fast Unit Tests + PostgreSQL 16 Real Migration Check
+  # ===========================================================================
+  test-and-migrate:
+    name: Pytest Suite & Alembic SQL Verification
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres_admin_secret
+          POSTGRES_DB: koloala
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d koloala"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python 3.12
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install dependencies from uv.lock
+        run: uv sync --frozen
+
+      - name: Run unit & integration test suite (Pytest)
+        run: uv run pytest -v
+
+      - name: Apply Least-Privilege SQL Roles on PostgreSQL 16
+        env:
+          PGPASSWORD: postgres_admin_secret
+        run: |
+          psql -h 127.0.0.1 -U postgres -d koloala -f app/db/sql/01_least_privilege_roles.sql
+
+      - name: Run Alembic migrations against real PostgreSQL 16
+        env:
+          MIGRATION_DATABASE_URL: postgresql+asyncpg://postgres:postgres_admin_secret@127.0.0.1:5432/koloala
+        run: uv run alembic upgrade head
+
+  # ===========================================================================
+  # JOB 2: Production Multi-Stage Dockerfile Build & Container Smoke Test
+  # ===========================================================================
+  docker-smoke-test:
+    name: Build Dockerfile & Probe /healthz Endpoints
+    runs-on: ubuntu-latest
+    needs: test-and-migrate
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build production Docker image
+        run: docker build -t koloala-api:ci .
+
+      - name: Start container and verify /healthz/liveness & /healthz/readiness
+        run: |
+          docker run -d --name koloala-test -p 8000:8000 koloala-api:ci
+          for i in $(seq 1 15); do
+            if curl -fsS http://127.0.0.1:8000/healthz/liveness && curl -fsS http://127.0.0.1:8000/healthz/readiness; then
+              echo "Container is healthy and ready!"
+              docker stop koloala-test
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs koloala-test
+          exit 1

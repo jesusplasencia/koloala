@@ -1,0 +1,24 @@
+# Git & IDE
+.git
+.gitignore
+.vscode
+
+# Local environments & secrets
+.venv
+.env
+.env.*
+*.private.http
+.env.json
+
+# Caches & Tests
+__pycache__
+*.py[oc]
+.pytest_cache
+.ruff_cache
+test/
+requests/
+
+# Local logs & Docs
+logs/
+README.md
+docker-compose.yml

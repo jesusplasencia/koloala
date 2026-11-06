@@ -534,3 +534,52 @@ async def test_lots_pagination_and_filtering(
     ).json()
     assert delinquents["total"] == 2
     assert [x["lot_id"] for x in delinquents["items"]] == ["F08", "U28"]
+
+
+# ---------------------------------------------------------------------------
+# 11. AUDIT LOG ROTATION & FINOPS: Límite de 5 .gz en PC Local y Borrado Total tras S3
+# ---------------------------------------------------------------------------
+def test_audit_gz_rotation_cleanup_and_s3_deletion(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core import audit
+    from app.core.config import settings
+
+    # Apuntamos audit_log_dir a una carpeta temporal limpia para el test
+    monkeypatch.setattr(settings, "audit_log_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "max_local_gz_files", 5)
+    monkeypatch.setattr(settings, "s3_audit_bucket", None)
+
+    # 1. MODO PC LOCAL (Sin S3): Simulamos 8 cierres horarios/shutdowns seguidos
+    for i in range(8):
+        raw_file = tmp_path / "audit.jsonl"
+        raw_file.write_text(f'{{"event": "TEST_{i}"}}\n', encoding="utf-8")
+        dest_file = tmp_path / f"audit.jsonl.2026-11-05_{i:02d}"
+        audit._hourly_s3_rotator(str(raw_file), str(dest_file))
+
+    # Verificamos que el archivo .jsonl original se borró y solo quedan máximo 5 archivos .gz
+    remaining_local_gz = sorted(tmp_path.glob("*.gz"))
+    assert not (tmp_path / "audit.jsonl").exists()
+    assert len(remaining_local_gz) == 5
+
+    # 2. MODO CONTENEDOR AWS ECS (Con S3_AUDIT_BUCKET activo):
+    # Simulamos que _upload_gz_to_s3 sube a S3 y borra cada archivo .gz local
+    uploaded_files: list[str] = []
+
+    def fake_s3_upload(gz_path) -> bool:
+        uploaded_files.append(gz_path.name)
+        gz_path.unlink(missing_ok=True)
+        return True
+
+    monkeypatch.setattr(settings, "s3_audit_bucket", "lasvillas-audit-bucket")
+    monkeypatch.setattr(audit, "_upload_gz_to_s3", fake_s3_upload)
+
+    raw_file = tmp_path / "audit.jsonl"
+    raw_file.write_text('{"event": "FINAL_SHUTDOWN"}\n', encoding="utf-8")
+    dest_file = tmp_path / "audit.jsonl.2026-11-05_99"
+    audit._hourly_s3_rotator(str(raw_file), str(dest_file))
+
+    # Sube el nuevo .gz + los 5 que estaban pendientes y deja CERO archivos .gz en el contenedor
+    assert len(uploaded_files) == 6
+    assert list(tmp_path.glob("*.gz")) == []

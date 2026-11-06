@@ -34,6 +34,7 @@ class Settings(BaseSettings):
 
     # Auditoría Forense Incremental (.jsonl) y Archivado S3
     audit_log_dir: str = "logs"
+    max_local_gz_files: int = 5  # En PC local (sin S3), conserva solo los últimos 5 .gz y borra los viejos
     s3_audit_bucket: str | None = None
     s3_audit_prefix: str = "audit-logs"
     s3_audit_storage_class: str = "GLACIER_IR"  # Glacier Instant Retrieval (lectura máx 1 vez/semana)

@@ -77,12 +77,38 @@ def _upload_gz_to_s3(gz_path: Path) -> bool:
         return False
 
 
+def _cleanup_or_sync_gz_files() -> None:
+    """
+    Evita acumulación de archivos .gz en disco:
+    - Si S3_AUDIT_BUCKET está activo (Producción ECS): intenta subir cualquier .gz pendiente
+      y lo elimina del contenedor inmediatamente tras subirlo.
+    - Si S3_AUDIT_BUCKET no está activo (PC Local): conserva solo los últimos N archivos .gz
+      (settings.max_local_gz_files, por defecto 5) y borra los más antiguos.
+    """
+    log_dir = Path(settings.audit_log_dir)
+    if not log_dir.exists():
+        return
+
+    gz_files = sorted(
+        log_dir.glob("*.gz"),
+        key=lambda p: p.stat().st_mtime,
+    )
+
+    if settings.s3_audit_bucket:
+        for gz_file in gz_files:
+            _upload_gz_to_s3(gz_file)
+    elif len(gz_files) > settings.max_local_gz_files:
+        for old_gz in gz_files[: -settings.max_local_gz_files]:
+            old_gz.unlink(missing_ok=True)
+
+
 def _hourly_s3_rotator(source: str, dest: str) -> None:
     """
     Se ejecuta automáticamente cada vez que el archivo audit.jsonl cumple 1 hora
     o cuando el contenedor se apaga (SIGTERM).
     1. Comprime el archivo cerrado en .gz (ahorrando ~85% de espacio).
-    2. Si hay un bucket S3 configurado, lo sube con clase GLACIER_IR.
+    2. Si hay un bucket S3 configurado, lo sube con clase GLACIER_IR y lo borra del contenedor.
+    3. Si está en PC local, limpia los .gz antiguos para no acumular archivos.
     """
     source_path = Path(source)
     gz_dest_path = Path(f"{dest}.gz")
@@ -90,7 +116,7 @@ def _hourly_s3_rotator(source: str, dest: str) -> None:
         with source_path.open("rb") as f_in, gzip.open(gz_dest_path, "wb") as f_out:
             shutil.copyfileobj(f_in, f_out)
         source_path.unlink(missing_ok=True)
-        _upload_gz_to_s3(gz_dest_path)
+        _cleanup_or_sync_gz_files()
     elif source_path.exists():
         source_path.unlink(missing_ok=True)
 

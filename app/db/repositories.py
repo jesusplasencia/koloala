@@ -12,7 +12,12 @@ from app.db.models import (
     UserORM,
 )
 from app.models.access import GuestPass, PassStatus, PassType
-from app.models.lot import BulkLotItem, PropertyLot, normalize_lot_id, normalize_villa_id
+from app.models.lot import (
+    BulkLotItem,
+    PropertyLot,
+    normalize_lot_id,
+    normalize_villa_id,
+)
 from app.models.user import AttackType, BlockedIPReport, User, UserRole
 
 
