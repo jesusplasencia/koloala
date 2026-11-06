@@ -1,4 +1,18 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _ensure_asyncpg_scheme(url: str) -> str:
+    """
+    Permite pegar directamente la URI de Supabase/RDS ('postgresql://...' o 'postgres://...')
+    en el .env y la convierte automáticamente a 'postgresql+asyncpg://...'.
+    """
+    cleaned = url.strip()
+    if cleaned.startswith("postgres://"):
+        return "postgresql+asyncpg://" + cleaned[len("postgres://") :]
+    if cleaned.startswith("postgresql://"):
+        return "postgresql+asyncpg://" + cleaned[len("postgresql://") :]
+    return cleaned
 
 
 class Settings(BaseSettings):
@@ -32,12 +46,19 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 5
 
+    @field_validator("database_url", "migration_database_url", mode="before")
+    @classmethod
+    def _normalize_db_urls(cls, value: str) -> str:
+        return _ensure_asyncpg_scheme(value)
+
     # Auditoría Forense Incremental (.jsonl) y Archivado S3
     audit_log_dir: str = "logs"
-    max_local_gz_files: int = 5  # En PC local (sin S3), conserva solo los últimos 5 .gz y borra los viejos
+    # En PC local (sin S3), conserva solo los últimos 5 .gz y borra los viejos
+    max_local_gz_files: int = 5
     s3_audit_bucket: str | None = None
     s3_audit_prefix: str = "audit-logs"
-    s3_audit_storage_class: str = "GLACIER_IR"  # Glacier Instant Retrieval (lectura máx 1 vez/semana)
+    # Glacier Instant Retrieval (lectura máx 1 vez/semana)
+    s3_audit_storage_class: str = "GLACIER_IR"
     aws_region: str = "us-east-1"
 
     model_config = SettingsConfigDict(
