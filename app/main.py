@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from app.api.v1.auth import router as auth_router
@@ -39,6 +40,15 @@ app = FastAPI(
     description="API for Koloala, core service for high-throughput containerized workloads.",
     docs_url=None,  # Personalizado abajo con StandaloneLayout + Selector de Definiciones
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allowed_origins,
+    allow_origin_regex=settings.cors_allow_origin_regex,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Villa-Id", "Accept"],
 )
 
 app.include_router(auth_router, prefix=settings.api_v1_prefix)

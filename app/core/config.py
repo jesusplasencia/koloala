@@ -61,6 +61,22 @@ class Settings(BaseSettings):
     s3_audit_storage_class: str = "GLACIER_IR"
     aws_region: str = "us-east-1"
 
+    # CORS para el Frontend PWA (fololala en Vite local + subdominios *.lasvillas.club)
+    cors_allowed_origins: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://vc1.localhost:5173",
+        "http://vc2.localhost:5173",
+        "http://vc3.localhost:5173",
+        "https://lasvillas.club",
+        "https://vc1.lasvillas.club",
+        "https://vc2.lasvillas.club",
+        "https://vc3.lasvillas.club",
+    ]
+    cors_allow_origin_regex: str = (
+        r"^https?://([a-z0-9-]+\.)?(lasvillas\.club|localhost|127\.0\.0\.1)(:\d+)?$"
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
