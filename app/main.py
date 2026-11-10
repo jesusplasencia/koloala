@@ -90,7 +90,11 @@ async def openapi_auth_definition() -> dict[str, Any]:
         title="Las Villas Club - Public Auth Definition",
         version="1.0",
         description="Portal público de inicio de sesión sectorizado por Villa (`vc1`, `vc2`, `vc3`). No requiere Authorize previo.",
-        allowed_path_prefixes=(f"{settings.api_v1_prefix}/auth/login",),
+        allowed_path_prefixes=(
+            f"{settings.api_v1_prefix}/auth/lookup",
+            f"{settings.api_v1_prefix}/auth/activate-pin",
+            f"{settings.api_v1_prefix}/auth/login",
+        ),
         strip_security=True,
     )
 

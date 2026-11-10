@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     s3_audit_storage_class: str = "GLACIER_IR"
     aws_region: str = "us-east-1"
 
+    # Notificaciones WhatsApp vía Evolution API (con fallback automático a consola en local)
+    evolution_api_url: str | None = None  # Ej: http://localhost:8080 o https://evo.lasvillas.club
+    evolution_api_key: str | None = None  # Global API Key o Instance Token de Evolution API
+    evolution_instance_name: str = "lasvillas"  # Nombre de la instancia vinculada por QR
+
     # CORS para el Frontend PWA (fololala en Vite local + subdominios *.lasvillas.club)
     cors_allowed_origins: list[str] = [
         "http://localhost:5173",

@@ -17,7 +17,12 @@ class UserRepositoryProtocol(Protocol):
         email: str | None = None,
     ) -> tuple[User, bool]: ...
     async def update_password(
-        self, villa_id: str, username: str, new_password_hash: str
+        self,
+        villa_id: str,
+        username: str,
+        new_password_hash: str,
+        *,
+        clear_last_login: bool = False,
     ) -> User | None: ...
     async def record_login_success(
         self, villa_id: str, username: str, client_ip: str
@@ -189,12 +194,19 @@ class InMemoryUserRepository:
         return new_user, True
 
     async def update_password(
-        self, villa_id: str, username: str, new_password_hash: str
+        self,
+        villa_id: str,
+        username: str,
+        new_password_hash: str,
+        *,
+        clear_last_login: bool = False,
     ) -> User | None:
         user = self._users.get(self._key(villa_id, username))
         if not user:
             return None
         user.password_hash = new_password_hash
+        if clear_last_login:
+            user.last_login_at = None
         user.updated_at = datetime.now(UTC)
         return user
 

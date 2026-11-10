@@ -200,7 +200,10 @@ class LotsService:
         existing_user = await self.user_repo.get_user(norm_villa, norm_id)
         if existing_user:
             await self.user_repo.update_password(
-                norm_villa, norm_id, hash_password(new_password)
+                norm_villa,
+                norm_id,
+                hash_password(new_password),
+                clear_last_login=True,
             )
         else:
             await self.user_repo.create_or_get_resident_user(

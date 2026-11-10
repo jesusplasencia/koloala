@@ -294,7 +294,12 @@ class PostgresUserRepository:
         return self._to_domain(new_row), True
 
     async def update_password(
-        self, villa_id: str, username: str, new_password_hash: str
+        self,
+        villa_id: str,
+        username: str,
+        new_password_hash: str,
+        *,
+        clear_last_login: bool = False,
     ) -> User | None:
         row = await self.session.get(
             UserORM, (normalize_villa_id(villa_id), normalize_lot_id(username))
@@ -302,6 +307,8 @@ class PostgresUserRepository:
         if not row:
             return None
         row.password_hash = new_password_hash
+        if clear_last_login:
+            row.last_login_at = None
         row.updated_at = datetime.now(UTC)
         await self.session.flush()
         return self._to_domain(row)

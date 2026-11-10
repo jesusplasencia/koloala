@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.api.v1.auth import get_user_repo
+from app.api.v1.auth import get_lot_repo, get_user_repo
 from app.api.v1.lots import get_lots_service
 from app.api.v1.passes import get_access_service
 from app.core.security import create_access_token
@@ -47,6 +47,7 @@ async def client(
         repo=lot_repo, user_repo=user_repo
     )
     app.dependency_overrides[get_user_repo] = lambda: user_repo
+    app.dependency_overrides[get_lot_repo] = lambda: lot_repo
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://vc3.lasvillas.club"
     ) as ac:
@@ -583,3 +584,83 @@ def test_audit_gz_rotation_cleanup_and_s3_deletion(
     # Sube el nuevo .gz + los 5 que estaban pendientes y deja CERO archivos .gz en el contenedor
     assert len(uploaded_files) == 6
     assert list(tmp_path.glob("*.gz")) == []
+
+
+# ---------------------------------------------------------------------------
+# 12. LOGIN INTELIGENTE 2 PASOS: Lookup por lote -> Activación WhatsApp Just-In-Time -> Login
+# ---------------------------------------------------------------------------
+async def test_two_step_login_lookup_and_just_in_time_whatsapp_pin(
+    client: AsyncClient,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.v1 import auth as auth_module
+
+    captured_pins: dict[str, str] = {}
+
+    async def fake_send_whatsapp_pin(
+        *,
+        phone: str,
+        villa_id: str,
+        lot_id: str,
+        owner_name: str,
+        pin_password: str,
+    ) -> tuple[bool, str]:
+        captured_pins[f"{villa_id}:{lot_id}:{phone}"] = pin_password
+        return True, "evolution_api_mock"
+
+    monkeypatch.setattr(
+        auth_module, "send_whatsapp_pin_notification", fake_send_whatsapp_pin
+    )
+
+    # 1. El Admin carga el lote P21 con su celular en el padrón (aún nunca ha iniciado sesión)
+    await client.put(
+        "/api/v1/lots/bulk",
+        headers=admin_headers,
+        json={
+            "lots": [
+                {
+                    "lot_id": "P21",
+                    "owner_name": "Familia Vargas",
+                    "owner_phone": "987654321",
+                    "is_maintenance_up_to_date": True,
+                }
+            ]
+        },
+    )
+
+    # 2. Paso 1 del vecino: escribe solo "P21" en /api/v1/auth/lookup
+    lookup_resp = await client.post("/api/v1/auth/lookup", json={"username": "P21"})
+    assert lookup_resp.status_code == 200
+    lookup_data = lookup_resp.json()
+    assert lookup_data["status"] == "NEEDS_PHONE_ACTIVATION"
+    assert lookup_data["masked_phone_hint"] == "••• 321"
+    assert lookup_data["owner_name"] == "Familia Vargas"
+
+    # 3. Si alguien ingresa un celular incorrecto, falla con 401
+    wrong_phone = await client.post(
+        "/api/v1/auth/activate-pin",
+        json={"username": "P21", "phone": "900000000"},
+    )
+    assert wrong_phone.status_code == 401
+
+    # 4. El vecino confirma su celular real -> se genera el PIN Just-In-Time en RAM y sale por WhatsApp
+    act_resp = await client.post(
+        "/api/v1/auth/activate-pin",
+        json={"username": "P21", "phone": "987 654 321"},
+    )
+    assert act_resp.status_code == 200
+    sent_pin = captured_pins.get("VC3:P21:51987654321")
+    assert sent_pin is not None
+    assert len(sent_pin) == 8 and sent_pin.isdigit()
+
+    # 5. El vecino ingresa con el PIN recibido en su WhatsApp
+    login_resp = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "P21", "password": sent_pin},
+    )
+    assert login_resp.status_code == 200
+
+    # 6. A partir de ahora (last_login_at != None), /lookup ya va directo a READY_FOR_PASSWORD
+    second_lookup = await client.post("/api/v1/auth/lookup", json={"username": "P21"})
+    assert second_lookup.json()["status"] == "READY_FOR_PASSWORD"

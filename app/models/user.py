@@ -91,3 +91,44 @@ class BlockedIPReport(BaseModel):
     )
     blocked_at: datetime | None = None
     last_user_agent: str | None = None
+
+
+class UserLookupRequest(BaseModel):
+    username: str = Field(
+        ...,
+        min_length=2,
+        max_length=30,
+        examples=["P21", "P20", "ADMIN"],
+        description="Código de lote o usuario de garita/administración",
+    )
+
+
+class UserLookupStatus(StrEnum):
+    READY_FOR_PASSWORD = "READY_FOR_PASSWORD"
+    NEEDS_PHONE_ACTIVATION = "NEEDS_PHONE_ACTIVATION"
+
+
+class UserLookupResponse(BaseModel):
+    villa_id: str
+    username: str
+    status: UserLookupStatus
+    masked_phone_hint: str | None = Field(
+        default=None,
+        description=(
+            "Últimos 3 dígitos del WhatsApp registrado (ej. '••• 321') "
+            "cuando requiere activación inicial"
+        ),
+    )
+    owner_name: str | None = None
+
+
+class ActivateLotPinRequest(BaseModel):
+    username: str = Field(..., min_length=2, max_length=30, examples=["P21"])
+    phone: str = Field(..., min_length=6, max_length=30, examples=["987654321"])
+
+
+class ActivateLotPinResponse(BaseModel):
+    villa_id: str
+    lot_id: str
+    delivery_channel: str
+    message: str
