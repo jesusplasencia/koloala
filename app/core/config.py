@@ -79,7 +79,7 @@ class Settings(BaseSettings):
         "https://vc3.lasvillas.club",
     ]
     cors_allow_origin_regex: str = (
-        r"^https?://([a-z0-9-]+\.)?(lasvillas\.club|localhost|127\.0\.0\.1)(:\d+)?$"
+        r"^https?://([a-z0-9-]+\.)?(lasvillas\.club|vercel\.app|pages\.dev|up\.railway\.app|localhost|127\.0\.0\.1)(:\d+)?$"
     )
 
     model_config = SettingsConfigDict(
