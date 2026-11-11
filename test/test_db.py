@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+﻿from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -31,8 +31,11 @@ def lot_repo() -> InMemoryLotRepository:
 
 @pytest.fixture
 def repo(lot_repo: InMemoryLotRepository) -> InMemoryAccessRepository:
-    """Crea un repositorio de accesos conectado al mismo padrón de lotes (lot_repo)."""
-    return InMemoryAccessRepository(lots_store=lot_repo.lots_store)
+    """Crea un repositorio de accesos conectado al mismo padrón de lotes y membresías 3NF (lot_repo)."""
+    return InMemoryAccessRepository(
+        lots_store=lot_repo.lots_store,
+        memberships_store=lot_repo.memberships_store,
+    )
 
 
 @pytest.fixture
@@ -634,7 +637,7 @@ async def test_two_step_login_lookup_and_just_in_time_whatsapp_pin(
     assert lookup_resp.status_code == 200
     lookup_data = lookup_resp.json()
     assert lookup_data["status"] == "NEEDS_PHONE_ACTIVATION"
-    assert lookup_data["masked_phone_hint"] == "••• 321"
+    assert "masked_phone_hint" not in lookup_data  # no se filtran dígitos del teléfono
     assert lookup_data["owner_name"] == "Familia Vargas"
 
     # 3. Si alguien ingresa un celular incorrecto, falla con 401
@@ -664,3 +667,635 @@ async def test_two_step_login_lookup_and_just_in_time_whatsapp_pin(
     # 6. A partir de ahora (last_login_at != None), /lookup ya va directo a READY_FOR_PASSWORD
     second_lookup = await client.post("/api/v1/auth/lookup", json={"username": "P21"})
     assert second_lookup.json()["status"] == "READY_FOR_PASSWORD"
+
+
+# ---------------------------------------------------------------------------
+# 13. ADMINS OFICIALES TELEFÓNICOS: Super Admin (916220518) y Admin VC3 (934253226)
+# ---------------------------------------------------------------------------
+async def test_official_phone_admins_916220518_and_934253226(
+    client: AsyncClient,
+) -> None:
+    # 1. Login del Super Admin de la App (Jesús Plasencia - 916220518)
+    super_login = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "916220518", "password": "91622051"},
+    )
+    assert super_login.status_code == 200
+    super_data = super_login.json()
+    assert super_data["role"] == UserRole.SUPER_ADMIN
+    assert super_data["username"] == "916220518"
+    super_headers = {"Authorization": f"Bearer {super_data['access_token']}"}
+
+    # El Super Admin puede gestionar VC3 y también VC2 sin bloqueo cross-tenant
+    vc3_lots = await client.get("/api/v1/lots", headers=super_headers)
+    assert vc3_lots.status_code == 200
+
+    vc2_lots = await client.get(
+        "/api/v1/lots", headers={**super_headers, "X-Villa-Id": "VC2"}
+    )
+    assert vc2_lots.status_code == 200
+    assert vc2_lots.json()["villa_id"] == "VC2"
+
+    # 2. Login del Administrador Oficial de Villa Club 3 (934253226)
+    vc3_admin_login = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "934253226", "password": "93425322"},
+    )
+    assert vc3_admin_login.status_code == 200
+    vc3_admin_data = vc3_admin_login.json()
+    assert vc3_admin_data["role"] == UserRole.ADMIN
+    vc3_admin_headers = {"Authorization": f"Bearer {vc3_admin_data['access_token']}"}
+
+    # El Admin de VC3 puede gestionar VC3 pero NO puede cruzar a VC2
+    vc3_ok = await client.get("/api/v1/lots", headers=vc3_admin_headers)
+    assert vc3_ok.status_code == 200
+
+    vc2_denied = await client.get(
+        "/api/v1/lots", headers={**vc3_admin_headers, "X-Villa-Id": "VC2"}
+    )
+    assert vc2_denied.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 14. FLUJO 3NF PERSONA-ANCLA (ANCHOR) & HOUSEHOLD: Angel Plasencia + QR Amigo Caillou + 403 Delete
+# ---------------------------------------------------------------------------
+async def test_anchor_adds_household_angel_plasencia_and_caillou_qr_traceability(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.v1 import auth as auth_module
+
+    captured_pins: dict[str, str] = {}
+
+    async def fake_send_whatsapp_pin(
+        *,
+        phone: str,
+        villa_id: str,
+        lot_id: str,
+        owner_name: str,
+        pin_password: str,
+    ) -> tuple[bool, str]:
+        captured_pins[phone] = pin_password
+        return True, "evolution_api_mock"
+
+    monkeypatch.setattr(
+        auth_module, "send_whatsapp_pin_notification", fake_send_whatsapp_pin
+    )
+
+    # 1. El Admin de Villa 3 (934253226) inicia sesión y precarga el Lote P20 con Persona-Ancla 916220518
+    admin_login = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "934253226", "password": "93425322"},
+    )
+    vc3_admin_headers = {
+        "Authorization": f"Bearer {admin_login.json()['access_token']}"
+    }
+
+    await client.put(
+        "/api/v1/lots/bulk",
+        headers=vc3_admin_headers,
+        json={
+            "lots": [
+                {
+                    "lot_id": "P20",
+                    "owner_name": "Jesus Plasencia",
+                    "owner_phone": "916220518",
+                    "is_maintenance_up_to_date": True,
+                }
+            ]
+        },
+    )
+
+    # 2. Jesús (916220518 - Persona-Ancla de P20) inicia sesión y agrega a Angel Plasencia (980180219) como HOUSEHOLD
+    anchor_login = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "916220518", "password": "91622051"},
+    )
+    anchor_headers = {"Authorization": f"Bearer {anchor_login.json()['access_token']}"}
+
+    add_mem_resp = await client.post(
+        "/api/v1/lots/P20/members",
+        headers=anchor_headers,
+        json={
+            "phone": "980180219",
+            "full_name": "Angel Plasencia",
+            "document_id": "71234567",
+        },
+    )
+    assert add_mem_resp.status_code == 201
+    mem_data = add_mem_resp.json()
+    assert mem_data["villa_id"] == "VC3"
+    assert mem_data["lot_id"] == "P20"
+    assert mem_data["phone"] == "980180219"
+    assert mem_data["full_name"] == "Angel Plasencia"
+    assert mem_data["membership_role"] == "HOUSEHOLD"
+
+    # 3. Angel Plasencia (980180219) entra por primera vez -> lookup detecta NEEDS_PHONE_ACTIVATION
+    angel_lookup = await client.post(
+        "/api/v1/auth/lookup",
+        json={"username": "980180219"},
+    )
+    assert angel_lookup.status_code == 200
+    assert angel_lookup.json()["status"] == "NEEDS_PHONE_ACTIVATION"
+    assert angel_lookup.json()["membership_role"] == "HOUSEHOLD"
+    assert angel_lookup.json()["available_lots"] == ["P20"]
+
+    # 4. Angel activa su PIN por WhatsApp (Evolution API) e inicia sesión con su celular
+    angel_act = await client.post(
+        "/api/v1/auth/activate-pin",
+        json={"username": "980180219", "phone": "980180219"},
+    )
+    assert angel_act.status_code == 200
+    angel_pin = captured_pins["51980180219"]
+
+    angel_login = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "980180219", "password": angel_pin},
+    )
+    assert angel_login.status_code == 200
+    angel_token_data = angel_login.json()
+    assert angel_token_data["lot_id"] == "P20"
+    assert angel_token_data["membership_role"] == "HOUSEHOLD"
+    assert angel_token_data["full_name"] == "Angel Plasencia"
+    angel_headers = {"Authorization": f"Bearer {angel_token_data['access_token']}"}
+
+    # 5. Como HOUSEHOLD, Angel genera un QR para la visita de "Amigo Caillou"
+    qr_resp = await client.post(
+        "/api/v1/passes",
+        headers=angel_headers,
+        json={"pass_type": "GUEST", "visitor_info": "Amigo Caillou"},
+    )
+    assert qr_resp.status_code == 201
+    qr_data = qr_resp.json()
+    assert qr_data["villa_id"] == "VC3"
+    assert qr_data["lot_id"] == "P20"
+    assert qr_data["visitor_info"] == "Amigo Caillou"
+    assert qr_data["created_by_phone"] == "980180219"
+    assert qr_data["created_by_name"] == "Angel Plasencia"
+    assert qr_data["created_by_role"] == "HOUSEHOLD"
+
+    # 6. REGLA DE PERMISOS: Como HOUSEHOLD, Angel NO puede agregar ni borrar a nadie del lote P20 (403 Forbidden)
+    forbidden_add = await client.post(
+        "/api/v1/lots/P20/members",
+        headers=angel_headers,
+        json={"phone": "955111222", "full_name": "Intruso"},
+    )
+    assert forbidden_add.status_code == 403
+    assert "HOUSEHOLD" in forbidden_add.json()["detail"]
+
+    forbidden_del = await client.delete(
+        "/api/v1/lots/P20/members/916220518",
+        headers=angel_headers,
+    )
+    assert forbidden_del.status_code == 403
+
+    # 7. En cambio, la Persona-Ancla (916220518) SÍ puede retirar a un HOUSEHOLD (soft-deactivate is_active=False)
+    anchor_del = await client.delete(
+        "/api/v1/lots/P20/members/980180219",
+        headers=anchor_headers,
+    )
+    assert anchor_del.status_code == 200
+    assert anchor_del.json()["is_active"] is False
+
+    # 8. Tras la baja, el JWT viejo de Angel (aún vigente 30 días) YA NO sirve para generar pases
+    revoked_qr = await client.post(
+        "/api/v1/passes",
+        headers=angel_headers,
+        json={"pass_type": "GUEST", "visitor_info": "Intento post-baja"},
+    )
+    assert revoked_qr.status_code == 403
+
+    # ...ni para listar a los integrantes del lote
+    revoked_list = await client.get("/api/v1/lots/P20/members", headers=angel_headers)
+    assert revoked_list.status_code == 403
+
+    # La lista del lote ya no incluye a Angel (baja lógica, no DELETE)
+    members_after = await client.get("/api/v1/lots/P20/members", headers=anchor_headers)
+    assert [m["phone"] for m in members_after.json()] == ["916220518"]
+
+    # 9. Angel ya activó su PIN: nadie puede forzar un nuevo reset por /activate-pin (anti-DoS)
+    replay = await client.post(
+        "/api/v1/auth/activate-pin",
+        json={"username": "980180219", "phone": "980180219"},
+    )
+    assert replay.status_code == 409
+
+    # 10. El ANCHOR re-agrega a Angel -> la misma fila se reactiva (upsert), sin duplicados
+    readd = await client.post(
+        "/api/v1/lots/P20/members",
+        headers=anchor_headers,
+        json={"phone": "980180219", "full_name": "Angel Plasencia"},
+    )
+    assert readd.status_code == 201
+    assert readd.json()["is_active"] is True
+    restored_qr = await client.post(
+        "/api/v1/passes",
+        headers=angel_headers,
+        json={"pass_type": "GUEST", "visitor_info": "Amigo Caillou (2)"},
+    )
+    assert restored_qr.status_code == 201
+
+
+# ---------------------------------------------------------------------------
+# 15. ESCENARIO 3NF MULTI-LOTE Y ROLES CRUZADOS: Pepito Juárez (P20, Q02) y Pepita Reina (Q03 Anchor + P20 Household)
+# ---------------------------------------------------------------------------
+async def test_3nf_multi_lot_and_cross_role_pepito_and_pepita(
+    client: AsyncClient,
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.v1 import auth as auth_module
+
+    captured_pins: dict[str, str] = {}
+
+    async def fake_send_whatsapp_pin(
+        *,
+        phone: str,
+        villa_id: str,
+        lot_id: str,
+        owner_name: str,
+        pin_password: str,
+    ) -> tuple[bool, str]:
+        captured_pins[phone] = pin_password
+        return True, "evolution_api_mock"
+
+    monkeypatch.setattr(
+        auth_module, "send_whatsapp_pin_notification", fake_send_whatsapp_pin
+    )
+
+    # 1. El Admin precarga P20 y Q02 a nombre de Pepito Juárez (911222333) y Q03 a nombre de Pepita Reina (944555666)
+    await client.put(
+        "/api/v1/lots/bulk",
+        headers=admin_headers,
+        json={
+            "lots": [
+                {
+                    "lot_id": "P20",
+                    "owner_name": "Pepito Juarez",
+                    "owner_phone": "911222333",
+                    "is_maintenance_up_to_date": True,
+                },
+                {
+                    "lot_id": "Q02",
+                    "owner_name": "Pepito Juarez",
+                    "owner_phone": "911222333",
+                    "is_maintenance_up_to_date": True,
+                },
+                {
+                    "lot_id": "Q03",
+                    "owner_name": "Pepita Reina",
+                    "owner_phone": "944555666",
+                    "is_maintenance_up_to_date": True,
+                },
+            ]
+        },
+    )
+
+    # 2. Pepito activa su único PIN e inicia sesión -> ve sus 2 lotes [P20, Q02]
+    await client.post(
+        "/api/v1/auth/activate-pin",
+        json={"username": "911222333", "phone": "911222333"},
+    )
+    pepito_login = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "911222333", "password": captured_pins["51911222333"]},
+    )
+    assert pepito_login.status_code == 200
+    assert pepito_login.json()["available_lots"] == ["P20", "Q02"]
+    pepito_headers = {
+        "Authorization": f"Bearer {pepito_login.json()['access_token']}"
+    }
+
+    # Pepito agrega a Pepita Reina (944555666) como HOUSEHOLD en P20
+    add_pepita = await client.post(
+        "/api/v1/lots/P20/members",
+        headers=pepito_headers,
+        json={"phone": "944555666", "full_name": "Pepita Reina"},
+    )
+    assert add_pepita.status_code == 201
+    assert add_pepita.json()["membership_role"] == "HOUSEHOLD"
+
+    # 3. Pepita Reina activa su PIN e inicia sesión -> es ANCHOR en Q03 y HOUSEHOLD en P20
+    await client.post(
+        "/api/v1/auth/activate-pin",
+        json={"username": "944555666", "phone": "944555666"},
+    )
+    pepita_login = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "944555666", "password": captured_pins["51944555666"]},
+    )
+    assert pepita_login.status_code == 200
+    pepita_data = pepita_login.json()
+    assert pepita_data["available_lots"] == ["Q03", "P20"]
+    pepita_headers = {"Authorization": f"Bearer {pepita_data['access_token']}"}
+
+    mems_resp = await client.get(
+        "/api/v1/lots/my-memberships", headers=pepita_headers
+    )
+    assert mems_resp.status_code == 200
+    roles_by_lot = {
+        m["lot_id"]: m["membership_role"] for m in mems_resp.json()
+    }
+    assert roles_by_lot == {"Q03": "ANCHOR", "P20": "HOUSEHOLD"}
+
+    # Pepita puede generar un QR eligiendo explícitamente el lote P20 (sale con rol HOUSEHOLD)
+    pass_p20 = await client.post(
+        "/api/v1/passes",
+        headers=pepita_headers,
+        json={
+            "pass_type": "DELIVERY",
+            "lot_id": "P20",
+            "visitor_info": "Rappi para P20",
+        },
+    )
+    assert pass_p20.status_code == 201
+    assert pass_p20.json()["lot_id"] == "P20"
+    assert pass_p20.json()["created_by_role"] == "HOUSEHOLD"
+
+    # Y puede generar otro QR eligiendo su propio lote Q03 (sale con rol ANCHOR)
+    pass_q03 = await client.post(
+        "/api/v1/passes",
+        headers=pepita_headers,
+        json={
+            "pass_type": "RESIDENT_QR",
+            "lot_id": "Q03",
+            "visitor_info": "Ingreso Personal Pepita",
+        },
+    )
+    assert pass_q03.status_code == 201
+    assert pass_q03.json()["lot_id"] == "Q03"
+    assert pass_q03.json()["created_by_role"] == "ANCHOR"
+
+
+# ---------------------------------------------------------------------------
+# 16. VISITANTE EXTERNO (PANADERÍA / BOTICA / CANCHITA) + BITÁCORA DIARIA GARITA Y ADMIN
+# ---------------------------------------------------------------------------
+async def test_visitor_self_registration_for_bakery_and_daily_log(
+    client: AsyncClient,
+    guard_headers: dict[str, str],
+    admin_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.v1 import auth as auth_module
+
+    captured_pins: dict[str, str] = {}
+
+    async def fake_send_whatsapp_pin(
+        *,
+        phone: str,
+        villa_id: str,
+        lot_id: str,
+        owner_name: str,
+        pin_password: str,
+    ) -> tuple[bool, str]:
+        captured_pins[phone] = pin_password
+        return True, "evolution_api_mock"
+
+    monkeypatch.setattr(
+        auth_module, "send_whatsapp_pin_notification", fake_send_whatsapp_pin
+    )
+
+    # 1. Una persona externa llega a la puerta de VC3, escanea el QR hacia vc3.lasvillas.club
+    # y coloca su celular (955443322) que no está en el padrón:
+    lookup = await client.post(
+        "/api/v1/auth/lookup", json={"username": "955443322"}
+    )
+    assert lookup.status_code == 200
+    lookup_data = lookup.json()
+    assert lookup_data["status"] == "UNREGISTERED_OFFER_VISITOR"
+    assert lookup_data["role"] == "VISITOR"
+    # SEGURIDAD: ningún teléfono del Administrador ni de residentes se expone a desconocidos
+    assert "934253226" not in lookup.text
+    assert "916220518" not in lookup.text
+    assert "admin_contact_badge" not in lookup_data
+    # SHADOW: catálogo de servicios deshabilitado (ni en lookup ni en endpoint)
+    assert lookup_data["available_services"] == []
+    shadow = await client.get("/api/v1/auth/villa-services")
+    assert shadow.status_code == 404
+
+    # Un tercero no puede "registrarse" sobre el número de una cuenta existente (admin/residente)
+    hijack = await client.post(
+        "/api/v1/auth/register-visitor",
+        json={"phone": "934253226", "full_name": "Impostor", "document_id": "12345678"},
+    )
+    assert hijack.status_code == 409
+
+    # Ni sobre un número precargado como HOUSEHOLD que aún no activó su PIN
+    await client.post(
+        "/api/v1/lots/B14/members",
+        headers=admin_headers,
+        json={"phone": "966000111", "full_name": "Conviviente Pendiente"},
+    )
+    preloaded = await client.post(
+        "/api/v1/auth/register-visitor",
+        json={"phone": "966000111", "full_name": "Impostor", "document_id": "12345678"},
+    )
+    assert preloaded.status_code == 409
+
+    # Documento inválido (letras raras / longitud) es rechazado
+    bad_doc = await client.post(
+        "/api/v1/auth/register-visitor",
+        json={"phone": "955443322", "full_name": "Carlos", "document_id": "4589-123"},
+    )
+    assert bad_doc.status_code == 400
+
+    # 2. Se registra como VISITOR con Nombre + DNI (8 dígitos)
+    reg_resp = await client.post(
+        "/api/v1/auth/register-visitor",
+        json={
+            "phone": "955443322",
+            "full_name": "Carlos Mendoza",
+            "document_id": "45891230",
+        },
+    )
+    assert reg_resp.status_code == 201
+    assert reg_resp.json()["role"] == "VISITOR"
+    visitor_pin = captured_pins["51955443322"]
+    assert len(visitor_pin) == 8 and visitor_pin.isdigit()
+
+    # Re-registro del mismo número -> 409 (nadie puede resetearle el PIN a otro visitante)
+    again = await client.post(
+        "/api/v1/auth/register-visitor",
+        json={"phone": "955443322", "full_name": "Otro", "document_id": "11111111"},
+    )
+    assert again.status_code == 409
+    assert len(captured_pins) == 1  # no se despachó un segundo PIN
+
+    # 3. Inicia sesión con el PIN recibido por WhatsApp
+    vis_login = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "955443322", "password": visitor_pin},
+    )
+    assert vis_login.status_code == 200
+    assert vis_login.json()["role"] == "VISITOR"
+    assert vis_login.json()["lot_id"] is None
+    vis_headers = {"Authorization": f"Bearer {vis_login.json()['access_token']}"}
+
+    # Un VISITOR no puede generar pases a nombre de un lote ajeno
+    hijack_lot = await client.post(
+        "/api/v1/passes",
+        headers=vis_headers,
+        json={"pass_type": "GUEST", "lot_id": "B14"},
+    )
+    assert hijack_lot.status_code == 403
+
+    # Ni ver la bitácora diaria ni el padrón
+    assert (await client.get("/api/v1/passes/daily-log", headers=vis_headers)).status_code == 403
+    assert (await client.get("/api/v1/lots", headers=vis_headers)).status_code == 403
+
+    # Genera su QR de visita (destino genérico mientras el catálogo esté en shadow)
+    vis_pass_resp = await client.post(
+        "/api/v1/passes",
+        headers=vis_headers,
+        json={"pass_type": "COMMERCE", "destination": "PANADERIA"},
+    )
+    assert vis_pass_resp.status_code == 201
+    vis_pass = vis_pass_resp.json()
+    assert vis_pass["destination"] == "VISITA"
+    assert vis_pass["created_by_phone"] == "955443322"
+    assert vis_pass["created_by_name"] == "Carlos Mendoza"
+    assert vis_pass["created_by_role"] == "VISITOR"
+
+    # 4. Garita verifica el QR completando DNI y placa
+    verify_resp = await client.post(
+        "/api/v1/passes/verify",
+        headers=guard_headers,
+        json={
+            "code": vis_pass["code"],
+            "visitor_dni": "45891230",
+            "vehicle_plate": "c1k-789",
+        },
+    )
+    assert verify_resp.status_code == 200
+    v = verify_resp.json()
+    assert v["authorized"] is True
+    assert v["created_by_role"] == "VISITOR"
+    assert v["checked_in_plate"] == "C1K-789"
+
+    # 5. Garita y Administración ven exactamente el mismo registro en la bitácora diaria
+    for headers in (guard_headers, admin_headers):
+        daily = await client.get("/api/v1/passes/daily-log", headers=headers)
+        assert daily.status_code == 200
+        log_data = daily.json()
+        assert log_data["villa_id"] == "VC3"
+        assert log_data["total_passes"] == 1
+        assert log_data["checked_in_count"] == 1
+        assert log_data["active_pending_count"] == 0
+        entry = log_data["items"][0]
+        assert entry["code"] == vis_pass["code"]
+        assert entry["created_by_name"] == "Carlos Mendoza"
+        assert entry["checked_in_dni"] == "45891230"
+        assert entry["checked_in_plate"] == "C1K-789"
+        assert entry["checked_in_by_guard"] == "GUARDIA1"
+        assert entry["status"] == "USED"
+
+    # 6. Aislamiento: el guardia de VC2 no ve la bitácora de VC3
+    vc2_guard = create_access_token(
+        username="GUARDIA1", role=UserRole.GUARD, villa_id="VC2", lot_id=None
+    )
+    vc2_daily = await client.get(
+        "/api/v1/passes/daily-log",
+        headers={"Authorization": f"Bearer {vc2_guard}", "X-Villa-Id": "VC2"},
+    )
+    assert vc2_daily.status_code == 200
+    assert vc2_daily.json()["total_passes"] == 0
+
+    # 7. Un residente no tiene acceso a la bitácora diaria
+    b14_token = create_access_token(
+        username="B14", role=UserRole.RESIDENT, villa_id="VC3", lot_id="B14"
+    )
+    resident_daily = await client.get(
+        "/api/v1/passes/daily-log", headers={"Authorization": f"Bearer {b14_token}"}
+    )
+    assert resident_daily.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 17. UNA SOLA CONTRASEÑA ENTRE VILLAS (VC3 y VC2): Pepito usa su mismo PIN en ambas villas
+# ---------------------------------------------------------------------------
+async def test_single_global_phone_password_across_multiple_villas(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.v1 import auth as auth_module
+
+    captured_pins: dict[str, str] = {}
+
+    async def fake_send_whatsapp_pin(
+        *,
+        phone: str,
+        villa_id: str,
+        lot_id: str,
+        owner_name: str,
+        pin_password: str,
+    ) -> tuple[bool, str]:
+        captured_pins[phone] = pin_password
+        return True, "evolution_api_mock"
+
+    monkeypatch.setattr(
+        auth_module, "send_whatsapp_pin_notification", fake_send_whatsapp_pin
+    )
+
+    # Super Admin (916220518) registra a Pepito (977888999) como ANCHOR de P20 en VC3 y ANCHOR de M20 en VC2
+    super_login = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "916220518", "password": "91622051"},
+    )
+    super_headers = {"Authorization": f"Bearer {super_login.json()['access_token']}"}
+
+    await client.put(
+        "/api/v1/lots/bulk",
+        headers=super_headers,
+        json={
+            "lots": [
+                {
+                    "lot_id": "P20",
+                    "owner_name": "Pepito MultiVilla",
+                    "owner_phone": "977888999",
+                    "is_maintenance_up_to_date": True,
+                }
+            ]
+        },
+    )
+    await client.put(
+        "/api/v1/lots/bulk",
+        headers={**super_headers, "X-Villa-Id": "VC2"},
+        json={
+            "lots": [
+                {
+                    "lot_id": "M20",
+                    "owner_name": "Pepito MultiVilla",
+                    "owner_phone": "977888999",
+                    "is_maintenance_up_to_date": True,
+                }
+            ]
+        },
+    )
+
+    # Pepito activa su PIN una sola vez en VC3
+    await client.post(
+        "/api/v1/auth/activate-pin",
+        json={"username": "977888999", "phone": "977888999"},
+    )
+    single_pin = captured_pins["51977888999"]
+
+    # Pepito entra a vc3.lasvillas.club con su celular y ese único PIN -> obtiene su lote P20
+    vc3_resp = await client.post(
+        "/api/v1/auth/login",
+        headers={"X-Villa-Id": "VC3"},
+        json={"username": "977888999", "password": single_pin},
+    )
+    assert vc3_resp.status_code == 200
+    assert vc3_resp.json()["villa_id"] == "VC3"
+    assert vc3_resp.json()["lot_id"] == "P20"
+
+    # Y cuando Pepito entra a vc2.lasvillas.club usa EXACTAMENTE el mismo celular y el mismo PIN -> obtiene M20!
+    vc2_resp = await client.post(
+        "/api/v1/auth/login",
+        headers={"X-Villa-Id": "VC2"},
+        json={"username": "977888999", "password": single_pin},
+    )
+    assert vc2_resp.status_code == 200
+    assert vc2_resp.json()["villa_id"] == "VC2"
+    assert vc2_resp.json()["lot_id"] == "M20"
+

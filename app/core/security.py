@@ -12,7 +12,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import settings
 from app.models.lot import normalize_villa_id
-from app.models.user import UserRole
+from app.models.user import MembershipRole, UserRole
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -90,6 +90,8 @@ def create_access_token(
     role: UserRole,
     villa_id: str = "VC3",
     lot_id: str | None = None,
+    membership_role: MembershipRole | str | None = None,
+    full_name: str | None = None,
     expires_delta: timedelta | None = None,
 ) -> str:
     """Crea un JWT firmado con HMAC-SHA256 válido por 30 días, sellado con el villa_id."""
@@ -103,6 +105,8 @@ def create_access_token(
         "sub": username,
         "role": str(role),
         "lot_id": lot_id,
+        "membership_role": str(membership_role) if membership_role else None,
+        "full_name": full_name,
         "iat": int(now.timestamp()),
         "exp": int(expire.timestamp()),
     }
@@ -147,12 +151,20 @@ def decode_access_token(token: str) -> dict[str, Any]:
 
 class AuthenticatedIdentity:
     def __init__(
-        self, villa_id: str, username: str, role: UserRole, lot_id: str | None
+        self,
+        villa_id: str,
+        username: str,
+        role: UserRole,
+        lot_id: str | None,
+        membership_role: MembershipRole | None = None,
+        full_name: str | None = None,
     ) -> None:
         self.villa_id = villa_id
         self.username = username
         self.role = role
         self.lot_id = lot_id
+        self.membership_role = membership_role
+        self.full_name = full_name
 
 
 async def get_current_identity(
@@ -167,14 +179,16 @@ async def get_current_identity(
         )
     payload = decode_access_token(credentials.credentials)
     token_villa = payload.get("villa_id", "VC3")
+    user_role = UserRole(payload["role"])
 
     # Si el request viene con subdominio explícito (ej. vc2.lasvillas.club) o X-Villa-Id,
     # validamos que coincida con el villa_id del token JWT para evitar cruces entre Villas.
+    # EXCEPCIÓN: El SUPER_ADMIN (916220518 - Jesús Plasencia) puede operar globalmente en cualquier Villa.
     explicit_header = request.headers.get("x-villa-id")
     host = request.headers.get("host", "").split(":")[0].strip().lower()
     if explicit_header or host.endswith(".lasvillas.club"):
         requested_villa = resolve_villa_id(request)
-        if requested_villa != token_villa:
+        if requested_villa != token_villa and user_role != UserRole.SUPER_ADMIN:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
@@ -182,12 +196,19 @@ async def get_current_identity(
                     f"y no tiene permisos para operar en {requested_villa}."
                 ),
             )
+        if user_role == UserRole.SUPER_ADMIN:
+            token_villa = requested_villa
+
+    raw_mem = payload.get("membership_role")
+    membership_role = MembershipRole(raw_mem) if raw_mem else None
 
     return AuthenticatedIdentity(
         villa_id=token_villa,
         username=payload["sub"],
-        role=UserRole(payload["role"]),
+        role=user_role,
         lot_id=payload.get("lot_id"),
+        membership_role=membership_role,
+        full_name=payload.get("full_name"),
     )
 
 
@@ -198,21 +219,29 @@ async def require_resident_identity(
     identity: CurrentIdentityDep,
 ) -> AuthenticatedIdentity:
     """
-    Asegura que quien llama al endpoint sea un Residente con lot_id asignado dentro de su Villa.
-    Retorna la identidad completa (villa_id + lot_id).
+    Asegura que quien llama al endpoint sea una persona autorizada para generar pases QR:
+    - RESIDENT (ANCHOR o HOUSEHOLD con lote)
+    - VISITOR (visitante empadronado con DNI/CE que va a comercios o visita)
+    - ADMIN / SUPER_ADMIN (cuando también actúan como residentes, ej. 916220518 en P20)
     """
-    if identity.role != UserRole.RESIDENT or not identity.lot_id:
+    if identity.role == UserRole.GUARD:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Solo los propietarios/residentes con un lote asignado pueden generar pases de visita.",
+            detail="El personal de Garita (GUARD) solo verifica pases; no genera códigos QR de visita.",
         )
+    if (
+        identity.role in (UserRole.RESIDENT, UserRole.ADMIN, UserRole.SUPER_ADMIN)
+        and not identity.lot_id
+    ):
+        # Si no tiene lot_id en el JWT, aún podría enviar lot_id explícito en el body (multi-lote)
+        pass
     return identity
 
 
 async def require_guard_or_admin(
     identity: CurrentIdentityDep,
 ) -> AuthenticatedIdentity:
-    if identity.role not in (UserRole.GUARD, UserRole.ADMIN):
+    if identity.role not in (UserRole.GUARD, UserRole.ADMIN, UserRole.SUPER_ADMIN):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acceso restringido exclusivamente al personal de Garita (GUARD) o Administración (ADMIN).",
@@ -221,7 +250,7 @@ async def require_guard_or_admin(
 
 
 async def require_admin(identity: CurrentIdentityDep) -> AuthenticatedIdentity:
-    if identity.role != UserRole.ADMIN:
+    if identity.role not in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Acceso restringido exclusivamente al Administrador de la Villa.",

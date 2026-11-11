@@ -1,17 +1,19 @@
 from collections.abc import AsyncIterator
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, status
 
 from app.core.audit import get_client_ip, get_user_agent
 from app.core.config import settings
-from app.core.security import AdminDep
+from app.core.security import AdminDep, CurrentIdentityDep
 from app.db.repositories import PostgresLotRepository, PostgresUserRepository
 from app.db.session import AsyncSessionLocal
 from app.models.lot import (
+    AddHouseholdMemberRequest,
     BulkUpsertLotsRequest,
     BulkUpsertLotsResponse,
     GeneratedLotCredential,
+    LotMembership,
     PaginatedLotsResponse,
     PropertyLot,
     UpdateLotMaintenanceRequest,
@@ -20,7 +22,7 @@ from app.repositories.lots_repo import in_memory_lot_repo
 from app.repositories.users_repo import in_memory_user_repo
 from app.services.lots_service import LotsService
 
-router = APIRouter(prefix="/lots", tags=["Maintenance of Lots"])
+router = APIRouter(prefix="/lots", tags=["Maintenance of Lots & 3NF Memberships"])
 
 
 async def get_lots_service() -> AsyncIterator[LotsService]:
@@ -41,6 +43,19 @@ async def get_lots_service() -> AsyncIterator[LotsService]:
 
 
 LotsServiceDep = Annotated[LotsService, Depends(get_lots_service)]
+
+
+@router.get("/my-memberships", response_model=list[LotMembership])
+async def get_my_lot_memberships(
+    identity: CurrentIdentityDep,
+    service: LotsServiceDep,
+) -> list[LotMembership]:
+    """
+    [RESIDENTE / ADMIN] Devuelve todos los lotes donde la persona autenticada
+    es ANCHOR (Persona-Ancla) o HOUSEHOLD (Conviviente) dentro de la Villa actual.
+    Permite seleccionar fácilmente entre varios lotes (ej. P20 y Q02).
+    """
+    return await service.list_my_memberships(identity)
 
 
 @router.get("", response_model=PaginatedLotsResponse)
@@ -145,6 +160,71 @@ async def bulk_sync_lots(
         villa_id=admin.villa_id,
         payload=payload,
         actor=admin.username,
+        client_ip=get_client_ip(request),
+        user_agent=get_user_agent(request),
+    )
+
+
+@router.get("/{lot_id}/members", response_model=list[LotMembership])
+async def list_lot_members(
+    lot_id: str,
+    identity: CurrentIdentityDep,
+    service: LotsServiceDep,
+) -> list[LotMembership]:
+    """
+    [ANCHOR / HOUSEHOLD / ADMIN] Lista los integrantes activos (Persona-Ancla y Convivientes)
+    asociados al lote especificado en la tabla 3NF lot_memberships.
+    """
+    return await service.list_lot_members(
+        villa_id=identity.villa_id,
+        lot_id=lot_id,
+        identity=identity,
+    )
+
+
+@router.post(
+    "/{lot_id}/members",
+    response_model=LotMembership,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_lot_household_member(
+    lot_id: str,
+    payload: AddHouseholdMemberRequest,
+    request: Request,
+    identity: CurrentIdentityDep,
+    service: LotsServiceDep,
+) -> LotMembership:
+    """
+    [SOLO ANCHOR DEL LOTE O ADMIN] Agrega un integrante HOUSEHOLD (ej. 'Angel Plasencia', '980180219')
+    al lote. Un integrante con rol HOUSEHOLD tiene estrictamente prohibido agregar o borrar miembros (403).
+    """
+    return await service.add_lot_member(
+        villa_id=identity.villa_id,
+        lot_id=lot_id,
+        payload=payload,
+        identity=identity,
+        client_ip=get_client_ip(request),
+        user_agent=get_user_agent(request),
+    )
+
+
+@router.delete("/{lot_id}/members/{member_phone}", response_model=LotMembership)
+async def remove_lot_household_member(
+    lot_id: str,
+    member_phone: str,
+    request: Request,
+    identity: CurrentIdentityDep,
+    service: LotsServiceDep,
+) -> LotMembership:
+    """
+    [SOLO ANCHOR DEL LOTE O ADMIN] Retira (desactiva vía UPDATE is_active=False) a un integrante
+    HOUSEHOLD del lote. Un HOUSEHOLD recibe 403 Forbidden si intenta borrar a alguien del lote.
+    """
+    return await service.deactivate_lot_member(
+        villa_id=identity.villa_id,
+        lot_id=lot_id,
+        member_phone=member_phone,
+        identity=identity,
         client_ip=get_client_ip(request),
         user_agent=get_user_agent(request),
     )

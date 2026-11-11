@@ -3,7 +3,7 @@
 
 ---
 
-## 🚀 Quickstart (Arranque Rápido y Testing)
+## 🚀 Quickstart (Arranque Rápido, Migraciones y Testing)
 
 Asumiendo que ya cuentas con **Python 3.12+** y **`uv`** instalados en tu máquina:
 
@@ -11,99 +11,88 @@ Asumiendo que ya cuentas con **Python 3.12+** y **`uv`** instalados en tu máqui
 # 1. Sincronizar dependencias (incluyendo entorno virtual .venv y herramientas de test)
 uv sync
 
-# 2. Levantar el servidor de desarrollo con recarga en caliente (Hot-Reload)
+# 2. Aplicar migraciones SQL (3NF) en PostgreSQL / Supabase
+uv run alembic upgrade head
+
+# 3. Poblar datos iniciales (Super Admin 916220518, Admin VC3 934253226, Guardia y Lote P20)
+uv run python -m app.db.seed
+
+# 4. Levantar el servidor de desarrollo con recarga en caliente (Hot-Reload)
 uv run uvicorn app.main:app --reload
 
-# 3. Ejecutar la suite completa de pruebas automatizadas (Pytest)
+# 5. Ejecutar la suite completa de 17 pruebas automatizadas (Pytest)
 uv run pytest -v
 ```
 
 Una vez encendido el servidor local en `http://127.0.0.1:8000`:
 - **Documentación Interactiva (Swagger UI):** `http://127.0.0.1:8000/docs`
-- **Health Check (Liveness Probe para AWS ALB/ECS):** `http://127.0.0.1:8000/healthz/liveness`
+- **Health Check (Liveness Probe):** `http://127.0.0.1:8000/healthz/liveness`
 - **Flujos HTTP Ejecutables:** Abre [`requests/api.http`](requests/api.http) en VS Code y haz clic en `Send Request` sobre cada paso.
 
 ---
 
-## 🛠️ Herramientas Requeridas en el Sistema del Desarrollador
+## 🏛️ Arquitectura Relacional 3NF e Identidad Telefónica (`lasvillas.club`)
 
-| Herramienta | Versión / ID | Propósito en el Proyecto |
-| :--- | :--- | :--- |
-| **Python** | `>= 3.12` | Runtime principal tipado moderno (`StrEnum`, `typing.Protocol`, `Annotated`). |
-| **uv** (Astral) | Latest | Gestor ultrarrápido de paquetes, entornos virtuales (`.venv`) y lockfile (`uv.lock`). |
-| **VS Code** | Latest | IDE recomendado con configuración lista en `.vscode/settings.json`. |
-| **Ruff** (VS Code Ext) | `charliermarsh.ruff` | Linter y formateador en tiempo real al guardar (`formatOnSave`). |
-| **Pylance** (VS Code Ext) | `ms-python.vscode-pylance` | Chequeo estático de tipos e inferencia de protocolos. |
-| **REST Client** (VS Code Ext) | `humao.rest-client` | Ejecución encadenada de peticiones HTTP desde [`requests/api.http`](requests/api.http). |
-| **Git** | `>= 2.40` | Control de versiones. |
-| **Docker Desktop** | Latest *(Próxima fase)* | Contenerización local de PostgreSQL y pruebas de imagen para AWS ECS Fargate. |
+**Koloala** implementa un modelo relacional normalizado (**1NF, 2NF y 3NF**) que desacopla la **Identidad de la Persona (su número de celular de 9 dígitos)** de los **Lotes Físicos (`property_lots`)**, replicando el estándar de control de accesos de edificios residenciales modernos (NYC / Smart Condos) a través de las 5 etapas de **Las Villas (`vc1`..`vc5.lasvillas.club`)**.
 
----
+### 1. Una Sola Contraseña Global por Persona
+- Cada persona se identifica con su **número de celular de 9 dígitos** (`username = 9XXXXXXXX`) y un **único PIN numérico de 8 dígitos** enviado por **WhatsApp (Evolution API)** en su primer ingreso.
+- Si un propietario posee lotes en distintas villas (por ejemplo, `P20` en `vc3.lasvillas.club` y `M20` en `vc2.lasvillas.club`), inicia sesión con **el mismo celular y el mismo PIN** en cualquier subdominio de `lasvillas.club`.
 
-## 🏘️ Presentación del Proyecto: Motor Multi-Villa de Control de Accesos (`lasvillas.club`)
+### 2. Roles de Administración y Jerarquía por Lote (`lot_memberships`)
+- **`SUPER_ADMIN` (`916220518` — Jesús Plasencia):** Administrador global de la plataforma `lasvillas.club` con acceso transversal a todas las Villas y simultáneamente **`ANCHOR`** del lote `VC3-P20`.
+- **`ADMIN` (`934253226` — Administrador Villa Club 3):** Administrador oficial de `VC3`. Precarga a las Personas-Ancla en el padrón, gestiona la habilitación mensual de mantenimiento y visualiza el listado diario de visitantes e ingresos de su Villa.
+- **`ANCHOR` (Persona-Ancla / Titular del Lote):**
+  - Siempre precargado por el Administrador de la Villa o el Super Admin.
+  - Puede tener uno o varios lotes (ej. Pepito Juárez es `ANCHOR` en `P20` y `Q02`).
+  - Puede generar códigos QR de acceso (propios, visitas, taxis, delivery) **y administrar la lista de integrantes (`HOUSEHOLD`) de su lote**.
+- **`HOUSEHOLD` (Conviviente / Familiar / Invitado Frecuente):**
+  - Agregado manualmente por la Persona-Ancla desde su sesión (ej. `Angel Plasencia`, `980180219`, asociado a `VC3 + P20`) o precargado por Administración.
+  - Obtiene su PIN de 8 dígitos por WhatsApp en su primer ingreso.
+  - **Permisos estrictos:** Dentro de la aplicación solo puede generar códigos QR de acceso asociados al lote, pero **NO puede agregar ni borrar a ningún integrante del lote (`403 Forbidden`)**.
+  - Además, una persona puede ser `ANCHOR` en su propio lote (`Q03`) y simultáneamente `HOUSEHOLD` en el lote de un familiar (`P20`), eligiendo con un toque para qué lote genera el QR.
+- **`VISITOR` (Visitante Externo):**
+  - Si el celular no tiene cuenta (no es `ANCHOR`, `HOUSEHOLD` ni `VISITOR`), se asume **VISITOR** y se inicia su onboarding: **Nombre y Apellido + DNI (8 dígitos) o Carnet de Extranjería (9-12 caracteres)** vía `POST /api/v1/auth/register-visitor`. Recibe su PIN por WhatsApp y genera un QR de visita trazable.
+  - **Seguridad:** nunca se expone el teléfono del Administrador ni de residentes a desconocidos, ni dígitos parciales de ningún número (el celular ya es el username).
+  - Un número con cuenta existente o precargado en el padrón no puede re-registrarse como visitante (`409`), y `/activate-pin` solo funciona para la activación inicial (`409` si ya tiene PIN activo) para evitar resets maliciosos.
+  - **[SHADOW]** Catálogo de servicios internos por Villa (Panadería, Botica, negocios custom como *Marcianos Clarita* o *Brostería Marcos Huamán*) y minimapa: implementado en [`app/models/villa_services.py`](app/models/villa_services.py) pero deshabilitado (`VISITOR_SERVICES_ENABLED = False`).
 
-**Koloala** es el motor backend de alta velocidad y grado de producción diseñado para digitalizar, asegurar y agilizar el control de acceso vehicular y peatonal en las garitas de vigilancia de condominios residenciales (iniciando con **Villa Club 3, Carabayllo** bajo `vc3.lasvillas.club` y escalable a `vc1`, `vc2`, `vc4`, etc.).
-
-### ¿Qué problema real resuelve?
-Tradicionalmente, el ingreso de un taxi, un delivery (Rappi, PedidosYa, couriers) o una visita familiar requería llamadas telefónicas a una garita saturada, validación manual en cuadernos de papel y discusiones con propietarios en mora de mantenimiento.
-
-**Koloala** transforma la experiencia en un flujo **SaaS Multi-Tenant de fricción cero**:
-1. **Privilegio Automatizado para el Vecino al Día (1 Toque):**
-   - El propietario inicia sesión una sola vez en su portal (`vc3.lasvillas.club`) y obtiene una sesión válida por **30 días** (pensado para ser amigable incluso con adultos mayores, sin vencimiento forzado de su clave inicial).
-   - Para autorizar un ingreso solo elige **`DELIVERY`**, **`TAXI`** o **`GUEST`** (y opcionalmente una nota breve). El sistema toma automáticamente su Villa y Lote (`VC3 + B14`) desde su token JWT, haciendo imposible suplantar a otro vecino, y le entrega un **código único de 6 caracteres / QR** con tiempo de vida dinámico (**45 min** para Delivery, **30 min** para Taxi, **8 horas** para Visitas).
-   - Si el lote registra deuda de mantenimiento (`is_maintenance_up_to_date = False`), el sistema bloquea la generación automática (`403 Forbidden`) e indica que el residente debe acercarse personalmente a abrir la reja.
-2. **Doble Verificación Forense en Garita (Closure con DNI + Placa):**
-   - El visitante o conductor presenta el código/QR en la garita.
-   - El vigilante valida el código ingresando obligatoriamente el **DNI** del visitante y la **Placa del vehículo** (obligatoria para todo Taxi/Delivery; opcional para visitas a pie).
-   - Si el vigilante olvida digitar la placa de un vehículo, el sistema **no quema el pase**, permitiéndole completar la placa y autorizar el ingreso en segundos. Una vez autorizado, el código de un solo uso queda **quemado (`USED`)**.
-3. **Gestión para la Junta Directiva / Administración de cada Villa:**
-   - **Edición en tiempo real (`PATCH /api/v1/lots/{lot_id}/maintenance`):** Habilita o pasa a mora un lote al instante cuando el vecino regulariza su cuota mensual.
-   - **Onboarding y Cierre Mensual Masivo (`PUT /api/v1/lots/bulk`):** Sincroniza el padrón de lotes con sus correos electrónicos y autogenera las credenciales iniciales (`VC3-P20-XXXX`) listas para enviar por WhatsApp o Email.
+### 3. Trazabilidad Forense en cada QR y Bitácora Diaria (`GET /api/v1/passes/daily-log`)
+- Cada pase QR almacena exactamente quién lo generó:
+  - Ejemplo: *"Angel Plasencia (`980180219`), rol `HOUSEHOLD` de `VC3` - Lote `P20`, generó QR para `Amigo Caillou`"*.
+- Tanto **Garita (`GUARD`)** (desde celular o computadora de escritorio) como el **Administrador de la Villa (`ADMIN`)** disponen del endpoint `GET /api/v1/passes/daily-log` para consultar en vivo todos los visitantes y residentes que han ingresado en el día con su rol, lote/destino comercial, DNI, placa vehicular y hora de check-in.
 
 ---
 
-## 🛡️ Seguridad de Grado Bancario y Auditoría Forense (FinOps)
+## 🗄️ Esquema de Base de Datos Relacional (3NF en PostgreSQL / Supabase)
 
-- **Aislamiento Multi-Villa por Llave Compuesta `(villa_id, lot_id)`:**
-  - Un solo despliegue en **AWS ECS Fargate** atiende múltiples etapas (`vc1.lasvillas.club`, `vc2.lasvillas.club`, `vc3.lasvillas.club`). El lote `("VC3", "B14")`, sus guardias y su Junta Directiva están criptográficamente aislados de `("VC2", "B14")`.
-- **Defensa Activa contra Fuerza Bruta y *Password Spraying* con Correlación de Vecino:**
-  - Si una dirección IP acumula **3 intentos fallidos de inicio de sesión** (ya sea atacando a un mismo lote o probando una clave común contra varios lotes como `B14`, `U28`, `P20`), **se bloquea exclusivamente la IP atacante** sin bloquearle la cuenta a la víctima inocente.
-  - Además, el motor cruza automáticamente la IP bloqueada contra el historial de inicios de sesión exitosos previos de la Villa, revelando al Administrador qué lote dentro del condominio originó el ataque (`suspected_lots_from_previous_logins`).
-- **Audit Logging Incremental en `.jsonl` con Rotación Horaria a S3 Glacier:**
-  - Cada operación (`AUTH_LOGIN_SUCCESS`, `PASS_CREATED`, `GATE_VERIFY_ALLOWED` con DNI y Placa, `SECURITY_IP_BLOCKED_BRUTE_FORCE`, etc.) se escribe en tiempo real en `logs/audit.jsonl` con hora UTC, hora exacta de **Lima (`America/Lima`)**, IP real detrás del Load Balancer (`X-Forwarded-For`) y `User-Agent`.
-  - Cada hora el log rota y se comprime automáticamente en `.gz`, listo para archivarse en **Amazon S3 (Glacier / Standard-IA)** por centavos de dólar al año sin inflar el almacenamiento de PostgreSQL ni pagar costos excesivos de ingesta en CloudWatch.
+| Tabla Física | Llave Primaria Compuesta | Llaves Foráneas / Índices | Propósito 3NF |
+| :--- | :--- | :--- | :--- |
+| **`property_lots`** | `(villa_id, lot_id)` | PK Compuesta | Representa únicamente el predio físico y su estado de mantenimiento (`is_maintenance_up_to_date`). |
+| **`lot_memberships`** | `(villa_id, lot_id, phone)` | `FK -> property_lots(villa_id, lot_id)` + Index `phone` | Relación `N:M` normalizada entre Personas (`phone`) y Lotes (`villa_id, lot_id`) con su rol (`ANCHOR` o `HOUSEHOLD`) y baja lógica (`is_active`) compatible con `koloala_runtime`. |
+| **`users`** | `(villa_id, username)` | Index `username` | Credenciales (`password_hash` PBKDF2-SHA256), `role` (`SUPER_ADMIN`, `ADMIN`, `GUARD`, `RESIDENT`, `VISITOR`), `full_name` y `document_id` (DNI/CE). |
+| **`guest_passes`** | `(villa_id, code)` | Index `lot_id` | Pases QR de un solo uso con trazabilidad completa (`created_by_phone`, `created_by_name`, `created_by_role`, `destination`, `checked_in_dni`, `checked_in_plate`, `checked_in_by_guard`). |
+| **`ip_security_records`** | `(villa_id, ip_address)` | `uq_villa_ip` | Radar Anti-Fuerza Bruta y Anti-Password Spraying (bloqueo al 3er fallo y correlación de lote sospechoso). |
 
 ---
 
-## 📂 Estructura del Proyecto (Clean Architecture)
+## 🧪 Cobertura de Pruebas Automatizadas (`test/test_db.py`)
 
-```text
-D:\Projects\koloala\
-├── app/
-│   ├── main.py                  # Entrypoint FastAPI + Routers + /healthz/liveness
-│   ├── api/v1/
-│   │   ├── auth.py              # Login Multi-Villa, Cambio de Clave y Reporte de IPs Bloqueadas
-│   │   ├── passes.py            # Creación de Pase (1 toque) y Verificación en Garita (DNI + Placa)
-│   │   └── lots.py              # Administración de Lotes y Carga Masiva (Bulk Upsert)
-│   ├── core/
-│   │   ├── config.py            # Pydantic Settings (TTLs, JWT 30 días, límites de seguridad)
-│   │   ├── security.py          # Hashing PBKDF2, JWT HS256, detector de Villa y Guardias de Rol
-│   │   └── audit.py             # Logger forense JSONL con rotación horaria y compresión .gz
-│   ├── models/
-│   │   ├── user.py              # Entidad User (RESIDENT, GUARD, ADMIN) y BlockedIPReport
-│   │   ├── lot.py               # Entidad PropertyLot con llave compuesta (villa_id, lot_id)
-│   │   └── access.py            # GuestPass y contratos HTTP de garita
-│   ├── repositories/
-│   │   ├── users_repo.py        # Repositorio de Usuarios + Radar Anti-Password Spraying por IP
-│   │   ├── lots_repo.py         # Repositorio de Lotes sectorizado por Villa
-│   │   └── access_repo.py       # Repositorio de Pases sectorizado por Villa
-│   └── services/
-│       ├── access_service.py    # Reglas de negocio de Garita, TTLs y validación de Placa/DNI
-│       └── lots_service.py      # Orquestación de mantenimiento y autogeneración de cuentas
-├── requests/
-│   └── api.http                 # Flujo completo ejecutable en VS Code (Login -> Pase -> Garita -> Admin)
-├── test/
-│   └── test_db.py               # 9 pruebas de integración (Happy Path, Morosidad, Placa, Spraying, Multi-Villa)
-├── pyproject.toml
-└── README.md
-```
+La suite cuenta con **17 tests de integración exhaustivos** (`uv run pytest -v`):
+1. `test_create_and_verify_pass_happy_path`: Ciclo completo de creación de QR y verificación en garita con DNI y placa.
+2. `test_taxi_requires_plate_without_burning_pass`: Retención en garita si falta placa en Taxi/Delivery sin quemar el pase.
+3. `test_cannot_reuse_already_used_pass`: Protección Single-Use Pass contra reuso de QR.
+4. `test_delinquent_lot_cannot_create_pass`: Bloqueo `403 Forbidden` para lotes con deuda de mantenimiento.
+5. `test_expired_pass_is_denied_at_gatehouse`: Expiración automática por TTL vencido.
+6. `test_pass_denied_if_admin_marks_lot_delinquent_before_arrival`: Revocación en tiempo real en garita si el lote entra en mora.
+7. `test_admin_bulk_upsert_generates_credentials_and_allows_login`: Sincronización masiva de padrón y reseteo Zero-Knowledge.
+8. `test_password_spraying_blocks_attacker_ip_and_identifies_suspect_lot`: Bloqueo de IP al 3er intento fallido e identificación forense.
+9. `test_multi_villa_isolation_between_vc3_and_vc2`: Aislamiento estricto entre Villas para cuentas locales.
+10. `test_lots_pagination_and_filtering`: Paginación de lotes y filtro de morosidad.
+11. `test_audit_gz_rotation_cleanup_and_s3_deletion`: Rotación horaria `.jsonl.gz` y limpieza FinOps para S3.
+12. `test_two_step_login_lookup_and_just_in_time_whatsapp_pin`: Activación Just-In-Time de PIN de 8 dígitos por WhatsApp (Evolution API).
+13. `test_official_phone_admins_916220518_and_934253226`: Verificación de permisos del Super Admin (`916220518`) y Admin de Villa 3 (`934253226`).
+14. `test_anchor_adds_household_angel_plasencia_and_caillou_qr_traceability`: Flujo completo donde `916220518` (`ANCHOR` en `P20`) agrega a `Angel Plasencia` (`980180219`, `HOUSEHOLD`), quien activa su PIN por WhatsApp, genera un QR para `"Amigo Caillou"` con trazabilidad completa y recibe `403 Forbidden` si intenta borrar o agregar miembros al lote.
+15. `test_3nf_multi_lot_and_cross_role_pepito_and_pepita`: Escenario 3NF donde Pepito Juárez es dueño de `P20` y `Q02`, y Pepita Reina es `ANCHOR` de `Q03` y `HOUSEHOLD` de `P20`.
+16. `test_visitor_self_registration_for_bakery_and_daily_log`: Onboarding VISITOR sin exponer teléfonos, bloqueo de suplantación/re-registro (`409`), visitante sin acceso a lotes ajenos ni bitácora (`403`), verificación en garita, bitácora idéntica para Garita y Admin, y aislamiento VC2/VC3.
+17. `test_single_global_phone_password_across_multiple_villas`: Experiencia de contraseña única entre `vc3.lasvillas.club` (`P20`) y `vc2.lasvillas.club` (`M20`).

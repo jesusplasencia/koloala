@@ -1,6 +1,14 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKeyConstraint,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -11,7 +19,7 @@ class Base(DeclarativeBase):
 class PropertyLotORM(Base):
     """
     Tabla 'property_lots' con Llave Primaria Compuesta (villa_id, lot_id).
-    Aísla los lotes de VC1, VC2, VC3 dentro de la misma tabla física.
+    Aísla los lotes físicos de VC1..VC5 dentro de la misma tabla física.
     """
 
     __tablename__ = "property_lots"
@@ -34,19 +42,59 @@ class PropertyLotORM(Base):
     )
 
 
+class LotMembershipORM(Base):
+    """
+    Tabla relacional 3NF 'lot_memberships' con Llave Primaria Compuesta (villa_id, lot_id, phone)
+    y Foreign Key Compuesta hacia property_lots(villa_id, lot_id).
+    Desacopla la Persona (phone) del Lote físico (villa_id, lot_id):
+    - Permite que una persona sea ANCHOR en varios lotes (ej. P20 y Q02).
+    - Permite que una persona sea ANCHOR en Q03 y HOUSEHOLD en P20.
+    - Cuando un ANCHOR retira a un HOUSEHOLD, se hace soft-deactivate (is_active=False)
+      compatible con el rol de mínimo privilegio 'koloala_runtime' (sin DELETE).
+    """
+
+    __tablename__ = "lot_memberships"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["villa_id", "lot_id"],
+            ["property_lots.villa_id", "property_lots.lot_id"],
+            name="fk_lot_memberships_property_lot",
+        ),
+    )
+
+    villa_id: Mapped[str] = mapped_column(String(15), primary_key=True)
+    lot_id: Mapped[str] = mapped_column(String(15), primary_key=True)
+    phone: Mapped[str] = mapped_column(String(30), primary_key=True, index=True)
+    full_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    document_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    membership_role: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="ANCHOR"
+    )
+    added_by: Mapped[str] = mapped_column(String(30), nullable=False, default="ADMIN")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
 class UserORM(Base):
     """
     Tabla 'users' con Llave Primaria Compuesta (villa_id, username).
-    Soporta RESIDENT (con lot_id), GUARD (sin lote) y ADMIN (sin lote).
+    Soporta SUPER_ADMIN ('916220518'), ADMIN ('934253226'), GUARD, RESIDENT y VISITOR.
     """
 
     __tablename__ = "users"
 
     villa_id: Mapped[str] = mapped_column(String(15), primary_key=True)
-    username: Mapped[str] = mapped_column(String(30), primary_key=True)
+    username: Mapped[str] = mapped_column(String(30), primary_key=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     lot_id: Mapped[str | None] = mapped_column(String(15), nullable=True)
+    full_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    document_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
     email: Mapped[str | None] = mapped_column(String(150), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_login_at: Mapped[datetime | None] = mapped_column(
@@ -64,16 +112,23 @@ class UserORM(Base):
 class GuestPassORM(Base):
     """
     Tabla 'guest_passes' con Llave Primaria Compuesta (villa_id, code).
-    Guarda el ciclo de vida del código/QR y el closure del vigilante (DNI + Placa).
+    Guarda el ciclo de vida del código/QR, la trazabilidad de quién lo creó
+    (created_by_phone, created_by_name, created_by_role) y el cierre del vigilante en garita.
     """
 
     __tablename__ = "guest_passes"
 
     villa_id: Mapped[str] = mapped_column(String(15), primary_key=True)
     code: Mapped[str] = mapped_column(String(10), primary_key=True)
-    lot_id: Mapped[str] = mapped_column(String(15), nullable=False, index=True)
+    lot_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     pass_type: Mapped[str] = mapped_column(String(20), nullable=False)
     visitor_info: Mapped[str] = mapped_column(String(100), nullable=False)
+    destination: Mapped[str] = mapped_column(
+        String(60), nullable=False, default="Lote"
+    )
+    created_by_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    created_by_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_by_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
@@ -86,6 +141,7 @@ class GuestPassORM(Base):
     )
     checked_in_dni: Mapped[str | None] = mapped_column(String(20), nullable=True)
     checked_in_plate: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    checked_in_by_guard: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
 
 class IPSecurityRecordORM(Base):
