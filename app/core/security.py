@@ -221,7 +221,6 @@ async def require_resident_identity(
     """
     Asegura que quien llama al endpoint sea una persona autorizada para generar pases QR:
     - RESIDENT (ANCHOR o HOUSEHOLD con lote)
-    - VISITOR (visitante empadronado con DNI/CE que va a comercios o visita)
     - ADMIN / SUPER_ADMIN (cuando también actúan como residentes, ej. 916220518 en P20)
     """
     if identity.role == UserRole.GUARD:

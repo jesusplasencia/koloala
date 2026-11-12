@@ -1,19 +1,18 @@
-﻿from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.api.v1.auth import get_lot_repo, get_user_repo
 from app.api.v1.lots import get_lots_service
-from app.api.v1.passes import get_access_service
+from app.api.v1.visits import get_visit_service
 from app.core.security import create_access_token
 from app.main import app
-from app.models.access import PassStatus, PassType
 from app.models.user import AttackType, UserRole
-from app.repositories.access_repo import InMemoryAccessRepository
+from app.repositories.visit_repo import InMemoryVisitRepository
 from app.repositories.lots_repo import InMemoryLotRepository
 from app.repositories.users_repo import InMemoryUserRepository
-from app.services.access_service import AccessService
+from app.services.visit_service import PublicRateLimiter, VisitService
 from app.services.lots_service import LotsService
 
 
@@ -30,9 +29,9 @@ def lot_repo() -> InMemoryLotRepository:
 
 
 @pytest.fixture
-def repo(lot_repo: InMemoryLotRepository) -> InMemoryAccessRepository:
-    """Crea un repositorio de accesos conectado al mismo padrón de lotes y membresías 3NF (lot_repo)."""
-    return InMemoryAccessRepository(
+def repo(lot_repo: InMemoryLotRepository) -> InMemoryVisitRepository:
+    """Repositorio de visitas conectado al mismo padrón de lotes y membresías 3NF (lot_repo)."""
+    return InMemoryVisitRepository(
         lots_store=lot_repo.lots_store,
         memberships_store=lot_repo.memberships_store,
     )
@@ -40,12 +39,12 @@ def repo(lot_repo: InMemoryLotRepository) -> InMemoryAccessRepository:
 
 @pytest.fixture
 async def client(
-    repo: InMemoryAccessRepository,
+    repo: InMemoryVisitRepository,
     lot_repo: InMemoryLotRepository,
     user_repo: InMemoryUserRepository,
 ):
     """Inyecta los 3 repositorios limpios en FastAPI durante la ejecución de cada test."""
-    app.dependency_overrides[get_access_service] = lambda: AccessService(repo=repo)
+    app.dependency_overrides[get_visit_service] = lambda: VisitService(repo, PublicRateLimiter())
     app.dependency_overrides[get_lots_service] = lambda: LotsService(
         repo=lot_repo, user_repo=user_repo
     )
@@ -88,191 +87,6 @@ def admin_headers() -> dict[str, str]:
         username="ADMIN", role=UserRole.ADMIN, villa_id="VC3", lot_id=None
     )
     return {"Authorization": f"Bearer {token}"}
-
-
-# ---------------------------------------------------------------------------
-# 1. HAPPY PATH: Login VC3+B14 -> Crea pase -> Vigilante verifica con DNI + Placa
-# ---------------------------------------------------------------------------
-async def test_create_and_verify_pass_happy_path(
-    client: AsyncClient,
-    b14_headers: dict[str, str],
-    guard_headers: dict[str, str],
-) -> None:
-    create_resp = await client.post(
-        "/api/v1/passes",
-        headers=b14_headers,
-        json={"pass_type": "DELIVERY"},
-    )
-    assert create_resp.status_code == 201
-    pass_data = create_resp.json()
-    assert len(pass_data["code"]) == 6
-    assert pass_data["villa_id"] == "VC3"
-    assert pass_data["lot_id"] == "B14"
-    assert pass_data["status"] == PassStatus.ACTIVE
-
-    verify_resp = await client.post(
-        "/api/v1/passes/verify",
-        headers=guard_headers,
-        json={
-            "code": pass_data["code"],
-            "visitor_dni": "45891230",
-            "vehicle_plate": "b7j-412",
-        },
-    )
-    assert verify_resp.status_code == 200
-    verification = verify_resp.json()
-    assert verification["authorized"] is True
-    assert verification["villa_id"] == "VC3"
-    assert verification["lot_id"] == "B14"
-    assert verification["owner_name"] == "Jesus Plasencia"
-    assert verification["checked_in_dni"] == "45891230"
-    assert verification["checked_in_plate"] == "B7J-412"
-
-
-# ---------------------------------------------------------------------------
-# 2. REGLA DE GARITA: Taxi/Delivery sin placa es retenido SIN quemar el código
-# ---------------------------------------------------------------------------
-async def test_taxi_requires_plate_without_burning_pass(
-    client: AsyncClient,
-    b14_headers: dict[str, str],
-    guard_headers: dict[str, str],
-) -> None:
-    create_resp = await client.post(
-        "/api/v1/passes",
-        headers=b14_headers,
-        json={"pass_type": "TAXI", "visitor_info": "Uber"},
-    )
-    code = create_resp.json()["code"]
-
-    missing_plate_resp = await client.post(
-        "/api/v1/passes/verify",
-        headers=guard_headers,
-        json={"code": code, "visitor_dni": "41223344"},
-    )
-    assert missing_plate_resp.json()["authorized"] is False
-    assert "FALTA PLACA" in missing_plate_resp.json()["message"]
-
-    ok_resp = await client.post(
-        "/api/v1/passes/verify",
-        headers=guard_headers,
-        json={"code": code, "visitor_dni": "41223344", "vehicle_plate": "ABC-123"},
-    )
-    assert ok_resp.json()["authorized"] is True
-
-
-# ---------------------------------------------------------------------------
-# 3. REGLA ANTI-REUSO (Single-Use Pass): Un código quemado no puede reusarse
-# ---------------------------------------------------------------------------
-async def test_cannot_reuse_already_used_pass(
-    client: AsyncClient,
-    b14_headers: dict[str, str],
-    guard_headers: dict[str, str],
-) -> None:
-    create_resp = await client.post(
-        "/api/v1/passes",
-        headers=b14_headers,
-        json={"pass_type": "GUEST", "visitor_info": "Visita peatonal"},
-    )
-    code = create_resp.json()["code"]
-
-    first_verify = await client.post(
-        "/api/v1/passes/verify",
-        headers=guard_headers,
-        json={"code": code, "visitor_dni": "70112233"},
-    )
-    assert first_verify.json()["authorized"] is True
-
-    second_verify = await client.post(
-        "/api/v1/passes/verify",
-        headers=guard_headers,
-        json={"code": code, "visitor_dni": "70112233"},
-    )
-    assert second_verify.status_code == 200
-    assert second_verify.json()["authorized"] is False
-    assert "ya fue utilizado" in second_verify.json()["message"]
-
-
-# ---------------------------------------------------------------------------
-# 4. REGLA DE MOROSIDAD (403 Forbidden): Vecino VC3+F08 con deuda no genera pases
-# ---------------------------------------------------------------------------
-async def test_delinquent_lot_cannot_create_pass(
-    client: AsyncClient,
-    f08_headers: dict[str, str],
-) -> None:
-    resp = await client.post(
-        "/api/v1/passes",
-        headers=f08_headers,
-        json={"pass_type": "DELIVERY", "visitor_info": "PedidosYa"},
-    )
-    assert resp.status_code == 403
-    assert "deuda de mantenimiento" in resp.json()["detail"]
-
-
-# ---------------------------------------------------------------------------
-# 5. REGLA DE EXPIRACIÓN (TTL Vencido): Taxi llega tarde a la garita
-# ---------------------------------------------------------------------------
-async def test_expired_pass_is_denied_at_gatehouse(
-    client: AsyncClient,
-    repo: InMemoryAccessRepository,
-    b14_headers: dict[str, str],
-    guard_headers: dict[str, str],
-) -> None:
-    create_resp = await client.post(
-        "/api/v1/passes",
-        headers=b14_headers,
-        json={"pass_type": PassType.TAXI},
-    )
-    code = create_resp.json()["code"]
-
-    stored_pass = await repo.get_pass_by_code("VC3", code)
-    assert stored_pass is not None
-    stored_pass.expires_at = datetime.now(UTC) - timedelta(minutes=1)
-    await repo.save_pass(stored_pass)
-
-    verify_resp = await client.post(
-        "/api/v1/passes/verify",
-        headers=guard_headers,
-        json={"code": code, "visitor_dni": "45891230", "vehicle_plate": "XYZ-999"},
-    )
-    assert verify_resp.json()["authorized"] is False
-    assert "expirado" in verify_resp.json()["message"]
-
-    updated_pass = await repo.get_pass_by_code("VC3", code)
-    assert updated_pass is not None
-    assert updated_pass.status == PassStatus.EXPIRED
-
-
-# ---------------------------------------------------------------------------
-# 6. REGLA DE REVOCACIÓN EN GARITA (Vía Admin API): Vecino cae en mora
-# ---------------------------------------------------------------------------
-async def test_pass_denied_if_admin_marks_lot_delinquent_before_arrival(
-    client: AsyncClient,
-    b14_headers: dict[str, str],
-    guard_headers: dict[str, str],
-    admin_headers: dict[str, str],
-) -> None:
-    create_resp = await client.post(
-        "/api/v1/passes",
-        headers=b14_headers,
-        json={"pass_type": PassType.GUEST, "visitor_info": "Invitado: Carlos"},
-    )
-    code = create_resp.json()["code"]
-
-    patch_resp = await client.patch(
-        "/api/v1/lots/B14/maintenance",
-        headers=admin_headers,
-        json={"is_maintenance_up_to_date": False},
-    )
-    assert patch_resp.status_code == 200
-    assert patch_resp.json()["is_maintenance_up_to_date"] is False
-
-    verify_resp = await client.post(
-        "/api/v1/passes/verify",
-        headers=guard_headers,
-        json={"code": code, "visitor_dni": "45891230"},
-    )
-    assert verify_resp.json()["authorized"] is False
-    assert "habilitación de mantenimiento" in verify_resp.json()["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -438,12 +252,12 @@ async def test_multi_villa_isolation_between_vc3_and_vc2(
 ) -> None:
     # 1. En VC3, el lote B14 está al día y puede crear su pase
     vc3_pass = await client.post(
-        "/api/v1/passes",
+        "/api/v1/visits/invite",
         headers=b14_headers,
-        json={"pass_type": "DELIVERY"},
+        json={"kind": "DELIVERY"},
     )
     assert vc3_pass.status_code == 201
-    code_vc3 = vc3_pass.json()["code"]
+    code_vc3 = vc3_pass.json()["short_code"]
 
     # 2. En VC2 (vc2.lasvillas.club), el lote B14 es de otra familia y está en mora (False)
     vc2_login = await client.post(
@@ -455,20 +269,20 @@ async def test_multi_villa_isolation_between_vc3_and_vc2(
     vc2_b14_token = vc2_login.json()["access_token"]
 
     vc2_pass_attempt = await client.post(
-        "/api/v1/passes",
+        "/api/v1/visits/invite",
         headers={
             "Authorization": f"Bearer {vc2_b14_token}",
             "X-Villa-Id": "VC2",
         },
-        json={"pass_type": "DELIVERY"},
+        json={"kind": "DELIVERY"},
     )
     assert vc2_pass_attempt.status_code == 403
 
     # 3. Un token de VC3 no puede operar si entra por el subdominio/header de VC2
     cross_tenant_attempt = await client.post(
-        "/api/v1/passes",
+        "/api/v1/visits/invite",
         headers={**b14_headers, "X-Villa-Id": "VC2"},
-        json={"pass_type": "TAXI"},
+        json={"kind": "TAXI"},
     )
     assert cross_tenant_attempt.status_code == 403
     assert "pertenece a VC3" in cross_tenant_attempt.json()["detail"]
@@ -477,16 +291,15 @@ async def test_multi_villa_isolation_between_vc3_and_vc2(
     vc2_guard_token = create_access_token(
         username="GUARDIA1", role=UserRole.GUARD, villa_id="VC2", lot_id=None
     )
-    vc2_verify = await client.post(
-        "/api/v1/passes/verify",
+    vc2_verify = await client.get(
+        f"/api/v1/guard/visits/{code_vc3}",
         headers={
             "Authorization": f"Bearer {vc2_guard_token}",
             "X-Villa-Id": "VC2",
         },
-        json={"code": code_vc3, "visitor_dni": "45891230", "vehicle_plate": "ABC-123"},
     )
-    assert vc2_verify.json()["authorized"] is False
-    assert "no existe en VC2" in vc2_verify.json()["message"]
+    assert vc2_verify.status_code == 404
+    assert "no existe en VC2" in vc2_verify.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -721,6 +534,7 @@ async def test_official_phone_admins_916220518_and_934253226(
 # ---------------------------------------------------------------------------
 async def test_anchor_adds_household_angel_plasencia_and_caillou_qr_traceability(
     client: AsyncClient,
+    guard_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.api.v1 import auth as auth_module
@@ -821,18 +635,19 @@ async def test_anchor_adds_household_angel_plasencia_and_caillou_qr_traceability
 
     # 5. Como HOUSEHOLD, Angel genera un QR para la visita de "Amigo Caillou"
     qr_resp = await client.post(
-        "/api/v1/passes",
+        "/api/v1/visits/invite",
         headers=angel_headers,
-        json={"pass_type": "GUEST", "visitor_info": "Amigo Caillou"},
+        json={"note": "Amigo Caillou", "attendees": [{"first_names": "Caillou"}]},
     )
     assert qr_resp.status_code == 201
     qr_data = qr_resp.json()
     assert qr_data["villa_id"] == "VC3"
-    assert qr_data["lot_id"] == "P20"
-    assert qr_data["visitor_info"] == "Amigo Caillou"
-    assert qr_data["created_by_phone"] == "980180219"
-    assert qr_data["created_by_name"] == "Angel Plasencia"
-    assert qr_data["created_by_role"] == "HOUSEHOLD"
+    assert qr_data["destination_label"] == "Lote P20"
+    guard_view = await client.get(
+        f"/api/v1/guard/visits/{qr_data['short_code']}", headers=guard_headers
+    )
+    assert guard_view.json()["host_name"] == "Angel Plasencia"
+    assert guard_view.json()["host_role"] == "HOUSEHOLD"
 
     # 6. REGLA DE PERMISOS: Como HOUSEHOLD, Angel NO puede agregar ni borrar a nadie del lote P20 (403 Forbidden)
     forbidden_add = await client.post(
@@ -859,9 +674,9 @@ async def test_anchor_adds_household_angel_plasencia_and_caillou_qr_traceability
 
     # 8. Tras la baja, el JWT viejo de Angel (aún vigente 30 días) YA NO sirve para generar pases
     revoked_qr = await client.post(
-        "/api/v1/passes",
+        "/api/v1/visits/invite",
         headers=angel_headers,
-        json={"pass_type": "GUEST", "visitor_info": "Intento post-baja"},
+        json={"note": "Intento post-baja"},
     )
     assert revoked_qr.status_code == 403
 
@@ -889,9 +704,9 @@ async def test_anchor_adds_household_angel_plasencia_and_caillou_qr_traceability
     assert readd.status_code == 201
     assert readd.json()["is_active"] is True
     restored_qr = await client.post(
-        "/api/v1/passes",
+        "/api/v1/visits/invite",
         headers=angel_headers,
-        json={"pass_type": "GUEST", "visitor_info": "Amigo Caillou (2)"},
+        json={"note": "Amigo Caillou (2)"},
     )
     assert restored_qr.status_code == 201
 
@@ -901,6 +716,7 @@ async def test_anchor_adds_household_angel_plasencia_and_caillou_qr_traceability
 # ---------------------------------------------------------------------------
 async def test_3nf_multi_lot_and_cross_role_pepito_and_pepita(
     client: AsyncClient,
+    guard_headers: dict[str, str],
     admin_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1000,214 +816,54 @@ async def test_3nf_multi_lot_and_cross_role_pepito_and_pepita(
 
     # Pepita puede generar un QR eligiendo explícitamente el lote P20 (sale con rol HOUSEHOLD)
     pass_p20 = await client.post(
-        "/api/v1/passes",
+        "/api/v1/visits/invite",
         headers=pepita_headers,
-        json={
-            "pass_type": "DELIVERY",
-            "lot_id": "P20",
-            "visitor_info": "Rappi para P20",
-        },
+        json={"kind": "DELIVERY", "lot_id": "P20", "note": "Rappi para P20"},
     )
     assert pass_p20.status_code == 201
-    assert pass_p20.json()["lot_id"] == "P20"
-    assert pass_p20.json()["created_by_role"] == "HOUSEHOLD"
+    assert pass_p20.json()["destination_label"] == "Lote P20"
+    p20_view = await client.get(
+        f"/api/v1/guard/visits/{pass_p20.json()['short_code']}", headers=guard_headers
+    )
+    assert p20_view.json()["host_role"] == "HOUSEHOLD"
+    assert p20_view.json()["kind"] == "DELIVERY"
 
     # Y puede generar otro QR eligiendo su propio lote Q03 (sale con rol ANCHOR)
     pass_q03 = await client.post(
-        "/api/v1/passes",
+        "/api/v1/visits/invite",
         headers=pepita_headers,
-        json={
-            "pass_type": "RESIDENT_QR",
-            "lot_id": "Q03",
-            "visitor_info": "Ingreso Personal Pepita",
-        },
+        json={"lot_id": "Q03", "note": "Visita a Q03"},
     )
     assert pass_q03.status_code == 201
-    assert pass_q03.json()["lot_id"] == "Q03"
-    assert pass_q03.json()["created_by_role"] == "ANCHOR"
+    assert pass_q03.json()["destination_label"] == "Lote Q03"
+    q03_view = await client.get(
+        f"/api/v1/guard/visits/{pass_q03.json()['short_code']}", headers=guard_headers
+    )
+    assert q03_view.json()["host_role"] == "ANCHOR"
 
 
 # ---------------------------------------------------------------------------
-# 16. VISITANTE EXTERNO (PANADERÍA / BOTICA / CANCHITA) + BITÁCORA DIARIA GARITA Y ADMIN
+# 16. SIN ROL VISITOR: un número desconocido no puede crear cuenta; se le indica pedir un QR
 # ---------------------------------------------------------------------------
-async def test_visitor_self_registration_for_bakery_and_daily_log(
+@pytest.mark.asyncio
+async def test_unknown_number_gets_no_account_and_no_visitor_registration(
     client: AsyncClient,
-    guard_headers: dict[str, str],
-    admin_headers: dict[str, str],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.api.v1 import auth as auth_module
-
-    captured_pins: dict[str, str] = {}
-
-    async def fake_send_whatsapp_pin(
-        *,
-        phone: str,
-        villa_id: str,
-        lot_id: str,
-        owner_name: str,
-        pin_password: str,
-    ) -> tuple[bool, str]:
-        captured_pins[phone] = pin_password
-        return True, "evolution_api_mock"
-
-    monkeypatch.setattr(
-        auth_module, "send_whatsapp_pin_notification", fake_send_whatsapp_pin
-    )
-
-    # 1. Una persona externa llega a la puerta de VC3, escanea el QR hacia vc3.lasvillas.club
-    # y coloca su celular (955443322) que no está en el padrón:
-    lookup = await client.post(
-        "/api/v1/auth/lookup", json={"username": "955443322"}
-    )
+    lookup = await client.post("/api/v1/auth/lookup", json={"username": "955443322"})
     assert lookup.status_code == 200
-    lookup_data = lookup.json()
-    assert lookup_data["status"] == "UNREGISTERED_OFFER_VISITOR"
-    assert lookup_data["role"] == "VISITOR"
-    # SEGURIDAD: ningún teléfono del Administrador ni de residentes se expone a desconocidos
-    assert "934253226" not in lookup.text
-    assert "916220518" not in lookup.text
-    assert "admin_contact_badge" not in lookup_data
-    # SHADOW: catálogo de servicios deshabilitado (ni en lookup ni en endpoint)
-    assert lookup_data["available_services"] == []
-    shadow = await client.get("/api/v1/auth/villa-services")
-    assert shadow.status_code == 404
+    data = lookup.json()
+    assert data["status"] == "UNREGISTERED_NO_ACCOUNT"
+    assert data["role"] is None
+    assert "QR" in data["message"]
+    assert "916220518" not in lookup.text and "934253226" not in lookup.text
 
-    # Un tercero no puede "registrarse" sobre el número de una cuenta existente (admin/residente)
-    hijack = await client.post(
+    gone = await client.post(
         "/api/v1/auth/register-visitor",
-        json={"phone": "934253226", "full_name": "Impostor", "document_id": "12345678"},
+        json={"phone": "955443322", "full_name": "Carlos", "document_id": "45891230"},
     )
-    assert hijack.status_code == 409
-
-    # Ni sobre un número precargado como HOUSEHOLD que aún no activó su PIN
-    await client.post(
-        "/api/v1/lots/B14/members",
-        headers=admin_headers,
-        json={"phone": "966000111", "full_name": "Conviviente Pendiente"},
-    )
-    preloaded = await client.post(
-        "/api/v1/auth/register-visitor",
-        json={"phone": "966000111", "full_name": "Impostor", "document_id": "12345678"},
-    )
-    assert preloaded.status_code == 409
-
-    # Documento inválido (letras raras / longitud) es rechazado
-    bad_doc = await client.post(
-        "/api/v1/auth/register-visitor",
-        json={"phone": "955443322", "full_name": "Carlos", "document_id": "4589-123"},
-    )
-    assert bad_doc.status_code == 400
-
-    # 2. Se registra como VISITOR con Nombre + DNI (8 dígitos)
-    reg_resp = await client.post(
-        "/api/v1/auth/register-visitor",
-        json={
-            "phone": "955443322",
-            "full_name": "Carlos Mendoza",
-            "document_id": "45891230",
-        },
-    )
-    assert reg_resp.status_code == 201
-    assert reg_resp.json()["role"] == "VISITOR"
-    visitor_pin = captured_pins["51955443322"]
-    assert len(visitor_pin) == 8 and visitor_pin.isdigit()
-
-    # Re-registro del mismo número -> 409 (nadie puede resetearle el PIN a otro visitante)
-    again = await client.post(
-        "/api/v1/auth/register-visitor",
-        json={"phone": "955443322", "full_name": "Otro", "document_id": "11111111"},
-    )
-    assert again.status_code == 409
-    assert len(captured_pins) == 1  # no se despachó un segundo PIN
-
-    # 3. Inicia sesión con el PIN recibido por WhatsApp
-    vis_login = await client.post(
-        "/api/v1/auth/login",
-        json={"username": "955443322", "password": visitor_pin},
-    )
-    assert vis_login.status_code == 200
-    assert vis_login.json()["role"] == "VISITOR"
-    assert vis_login.json()["lot_id"] is None
-    vis_headers = {"Authorization": f"Bearer {vis_login.json()['access_token']}"}
-
-    # Un VISITOR no puede generar pases a nombre de un lote ajeno
-    hijack_lot = await client.post(
-        "/api/v1/passes",
-        headers=vis_headers,
-        json={"pass_type": "GUEST", "lot_id": "B14"},
-    )
-    assert hijack_lot.status_code == 403
-
-    # Ni ver la bitácora diaria ni el padrón
-    assert (await client.get("/api/v1/passes/daily-log", headers=vis_headers)).status_code == 403
-    assert (await client.get("/api/v1/lots", headers=vis_headers)).status_code == 403
-
-    # Genera su QR de visita (destino genérico mientras el catálogo esté en shadow)
-    vis_pass_resp = await client.post(
-        "/api/v1/passes",
-        headers=vis_headers,
-        json={"pass_type": "COMMERCE", "destination": "PANADERIA"},
-    )
-    assert vis_pass_resp.status_code == 201
-    vis_pass = vis_pass_resp.json()
-    assert vis_pass["destination"] == "VISITA"
-    assert vis_pass["created_by_phone"] == "955443322"
-    assert vis_pass["created_by_name"] == "Carlos Mendoza"
-    assert vis_pass["created_by_role"] == "VISITOR"
-
-    # 4. Garita verifica el QR completando DNI y placa
-    verify_resp = await client.post(
-        "/api/v1/passes/verify",
-        headers=guard_headers,
-        json={
-            "code": vis_pass["code"],
-            "visitor_dni": "45891230",
-            "vehicle_plate": "c1k-789",
-        },
-    )
-    assert verify_resp.status_code == 200
-    v = verify_resp.json()
-    assert v["authorized"] is True
-    assert v["created_by_role"] == "VISITOR"
-    assert v["checked_in_plate"] == "C1K-789"
-
-    # 5. Garita y Administración ven exactamente el mismo registro en la bitácora diaria
-    for headers in (guard_headers, admin_headers):
-        daily = await client.get("/api/v1/passes/daily-log", headers=headers)
-        assert daily.status_code == 200
-        log_data = daily.json()
-        assert log_data["villa_id"] == "VC3"
-        assert log_data["total_passes"] == 1
-        assert log_data["checked_in_count"] == 1
-        assert log_data["active_pending_count"] == 0
-        entry = log_data["items"][0]
-        assert entry["code"] == vis_pass["code"]
-        assert entry["created_by_name"] == "Carlos Mendoza"
-        assert entry["checked_in_dni"] == "45891230"
-        assert entry["checked_in_plate"] == "C1K-789"
-        assert entry["checked_in_by_guard"] == "GUARDIA1"
-        assert entry["status"] == "USED"
-
-    # 6. Aislamiento: el guardia de VC2 no ve la bitácora de VC3
-    vc2_guard = create_access_token(
-        username="GUARDIA1", role=UserRole.GUARD, villa_id="VC2", lot_id=None
-    )
-    vc2_daily = await client.get(
-        "/api/v1/passes/daily-log",
-        headers={"Authorization": f"Bearer {vc2_guard}", "X-Villa-Id": "VC2"},
-    )
-    assert vc2_daily.status_code == 200
-    assert vc2_daily.json()["total_passes"] == 0
-
-    # 7. Un residente no tiene acceso a la bitácora diaria
-    b14_token = create_access_token(
-        username="B14", role=UserRole.RESIDENT, villa_id="VC3", lot_id="B14"
-    )
-    resident_daily = await client.get(
-        "/api/v1/passes/daily-log", headers={"Authorization": f"Bearer {b14_token}"}
-    )
-    assert resident_daily.status_code == 403
+    assert gone.status_code == 404
+    assert (await client.post("/api/v1/passes", json={})).status_code == 404
+    assert (await client.post("/api/v1/passes/verify", json={})).status_code == 404
 
 
 # ---------------------------------------------------------------------------

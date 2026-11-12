@@ -6,16 +6,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.security import hash_password
 from app.db.models import (
-    GuestPassORM,
     IPSecurityRecordORM,
     LotMembershipORM,
     PropertyLotORM,
     UserORM,
 )
-from app.models.access import GuestPass, PassStatus, PassType
 from app.models.lot import (
     BulkLotItem,
     LotMembership,
+    LotType,
     PropertyLot,
     normalize_lot_id,
     normalize_phone_username,
@@ -42,6 +41,9 @@ class PostgresLotRepository:
             owner_phone=row.owner_phone,
             owner_email=row.owner_email,
             is_maintenance_up_to_date=row.is_maintenance_up_to_date,
+            lot_type=LotType(row.lot_type or "LOT"),
+            display_name=row.display_name,
+            is_public=bool(row.is_public),
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -327,7 +329,9 @@ class PostgresLotRepository:
         )
 
 
-class PostgresAccessRepository:
+class PostgresMembershipLookup:
+    """Lecturas de lotes y membresías activas compartidas por visitas y carnet."""
+
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
@@ -339,6 +343,9 @@ class PostgresAccessRepository:
             owner_phone=row.owner_phone,
             owner_email=row.owner_email,
             is_maintenance_up_to_date=row.is_maintenance_up_to_date,
+            lot_type=LotType(row.lot_type or "LOT"),
+            display_name=row.display_name,
+            is_public=bool(row.is_public),
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -355,26 +362,6 @@ class PostgresAccessRepository:
             is_active=row.is_active,
             created_at=row.created_at,
             updated_at=row.updated_at,
-        )
-
-    def _pass_to_domain(self, row: GuestPassORM) -> GuestPass:
-        return GuestPass(
-            villa_id=row.villa_id,
-            code=row.code,
-            lot_id=row.lot_id,
-            pass_type=PassType(row.pass_type),
-            visitor_info=row.visitor_info,
-            destination=row.destination,
-            created_by_phone=row.created_by_phone,
-            created_by_name=row.created_by_name,
-            created_by_role=row.created_by_role,
-            status=PassStatus(row.status),
-            created_at=row.created_at,
-            expires_at=row.expires_at,
-            used_at=row.used_at,
-            checked_in_dni=row.checked_in_dni,
-            checked_in_plate=row.checked_in_plate,
-            checked_in_by_guard=row.checked_in_by_guard,
         )
 
     async def get_lot(self, villa_id: str, lot_id: str) -> PropertyLot | None:
@@ -408,58 +395,6 @@ class PostgresAccessRepository:
         )
         rows = (await self.session.execute(stmt)).scalars().all()
         return [self._mem_to_domain(r) for r in rows]
-
-    async def save_pass(self, guest_pass: GuestPass) -> GuestPass:
-        key = (normalize_villa_id(guest_pass.villa_id), guest_pass.code.upper())
-        row = await self.session.get(GuestPassORM, key)
-        if row:
-            row.status = str(guest_pass.status)
-            row.used_at = guest_pass.used_at
-            row.expires_at = guest_pass.expires_at
-            row.checked_in_dni = guest_pass.checked_in_dni
-            row.checked_in_plate = guest_pass.checked_in_plate
-            row.checked_in_by_guard = guest_pass.checked_in_by_guard
-        else:
-            row = GuestPassORM(
-                villa_id=key[0],
-                code=key[1],
-                lot_id=guest_pass.lot_id,
-                pass_type=str(guest_pass.pass_type),
-                visitor_info=guest_pass.visitor_info,
-                destination=guest_pass.destination,
-                created_by_phone=guest_pass.created_by_phone,
-                created_by_name=guest_pass.created_by_name,
-                created_by_role=guest_pass.created_by_role,
-                status=str(guest_pass.status),
-                created_at=guest_pass.created_at,
-                expires_at=guest_pass.expires_at,
-                used_at=guest_pass.used_at,
-                checked_in_dni=guest_pass.checked_in_dni,
-                checked_in_plate=guest_pass.checked_in_plate,
-                checked_in_by_guard=guest_pass.checked_in_by_guard,
-            )
-            self.session.add(row)
-        await self.session.flush()
-        return self._pass_to_domain(row)
-
-    async def get_pass_by_code(self, villa_id: str, code: str) -> GuestPass | None:
-        row = await self.session.get(
-            GuestPassORM, (normalize_villa_id(villa_id), code.upper())
-        )
-        return self._pass_to_domain(row) if row else None
-
-    async def list_passes_for_villa(
-        self, villa_id: str, limit: int = 200
-    ) -> list[GuestPass]:
-        norm_villa = normalize_villa_id(villa_id)
-        stmt = (
-            select(GuestPassORM)
-            .where(GuestPassORM.villa_id == norm_villa)
-            .order_by(GuestPassORM.created_at.desc())
-            .limit(limit)
-        )
-        rows = (await self.session.execute(stmt)).scalars().all()
-        return [self._pass_to_domain(r) for r in rows]
 
 
 class PostgresUserRepository:

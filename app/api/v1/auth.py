@@ -29,18 +29,11 @@ from app.models.user import (
     ChangePasswordRequest,
     LoginRequest,
     MembershipRole,
-    RegisterVisitorRequest,
-    RegisterVisitorResponse,
     TokenResponse,
     UserLookupRequest,
     UserLookupResponse,
     UserLookupStatus,
     UserRole,
-)
-from app.models.villa_services import (
-    VISITOR_SERVICES_ENABLED,
-    find_villa_service,
-    list_villa_services,
 )
 from app.repositories.lots_repo import LotRepositoryProtocol, in_memory_lot_repo
 from app.repositories.users_repo import UserRepositoryProtocol, in_memory_user_repo
@@ -78,14 +71,6 @@ UserRepoDep = Annotated[UserRepositoryProtocol, Depends(get_user_repo)]
 LotRepoDep = Annotated[LotRepositoryProtocol, Depends(get_lot_repo)]
 
 
-@router.get("/villa-services", include_in_schema=False)
-async def get_villa_services(villa_id: VillaIdDep) -> list[dict[str, str]]:
-    """[SHADOW] Catálogo de servicios internos. Deshabilitado hasta activar VISITOR_SERVICES_ENABLED."""
-    if not VISITOR_SERVICES_ENABLED:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
-    return [s.model_dump() for s in list_villa_services(villa_id)]
-
-
 @router.post("/lookup", response_model=UserLookupResponse)
 async def lookup_user_login_state(
     payload: UserLookupRequest,
@@ -99,8 +84,8 @@ async def lookup_user_login_state(
     - Si ya tiene PIN activo (last_login_at != None), devuelve READY_FOR_PASSWORD.
     - Si está precargado como ANCHOR o HOUSEHOLD en la tabla 3NF lot_memberships (o en property_lots)
       y aún nunca ha iniciado sesión, devuelve NEEDS_PHONE_ACTIVATION.
-    - Si no tiene cuenta, devuelve UNREGISTERED_OFFER_VISITOR para iniciar su onboarding
-      como VISITOR (Nombre + DNI/CE). Nunca se expone el teléfono de Admin ni residentes.
+    - Si no tiene cuenta, devuelve UNREGISTERED_NO_ACCOUNT: los visitantes no crean cuenta,
+      entran con el QR de su anfitrión o del cartel de garita. Nunca se expone el teléfono de nadie.
     """
     norm_username = normalize_lot_id(payload.username)
     user = await user_repo.get_user(villa_id, norm_username)
@@ -168,23 +153,16 @@ async def lookup_user_login_state(
             role=user.role if user else UserRole.RESIDENT,
         )
 
-    # 4. Celular de 9 dígitos sin cuenta (no es ANCHOR, HOUSEHOLD ni VISITOR):
-    # se asume VISITOR y se inicia su onboarding (Nombre + DNI/CE).
+    # 4. Celular de 9 dígitos sin cuenta: los visitantes NO crean cuenta.
     # SEGURIDAD: jamás se expone el teléfono del Administrador ni de residentes a desconocidos.
     if norm_username.isdigit() and len(norm_username) == 9:
         return UserLookupResponse(
             villa_id=villa_id,
             username=norm_username,
-            status=UserLookupStatus.UNREGISTERED_OFFER_VISITOR,
-            role=UserRole.VISITOR,
-            visitor_onboarding_message=(
-                f"Bienvenido a {villa_id}. Para ingresar regístrate con tu nombre "
-                "y tu DNI o Carnet de Extranjería."
-            ),
-            available_services=(
-                [s.model_dump() for s in list_villa_services(villa_id)]
-                if VISITOR_SERVICES_ENABLED
-                else []
+            status=UserLookupStatus.UNREGISTERED_NO_ACCOUNT,
+            message=(
+                "Este número no tiene cuenta. Si vienes de visita, pide a tu anfitrión "
+                "un QR o escanea el cartel de la garita."
             ),
         )
 
@@ -358,123 +336,6 @@ async def activate_lot_pin_via_whatsapp(
     )
 
 
-@router.post(
-    "/register-visitor",
-    response_model=RegisterVisitorResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def register_external_visitor(
-    payload: RegisterVisitorRequest,
-    request: Request,
-    villa_id: VillaIdDep,
-    user_repo: UserRepoDep,
-    lot_repo: LotRepoDep,
-) -> RegisterVisitorResponse:
-    """
-    Autoregistro con trazabilidad para visitantes externos o clientes de comercios internos
-    (Panadería, Botica, Parque, Canchita):
-    - Valida celular de 9 dígitos y DNI (8 dígitos) o Carnet de Extranjería (9-12 caracteres).
-    - Genera PIN de 8 dígitos en RAM, guarda solo el hash y lo despacha por WhatsApp (Evolution API).
-    """
-    client_ip = get_client_ip(request)
-    user_agent = get_user_agent(request)
-
-    norm_phone = normalize_phone_username(payload.phone)
-    if not norm_phone or not norm_phone.isdigit() or len(norm_phone) != 9:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Ingresa un número de celular válido de 9 dígitos (ej. 955443322).",
-        )
-
-    cleaned_doc = payload.document_id.strip().upper()
-    if not (8 <= len(cleaned_doc) <= 12) or not cleaned_doc.isalnum():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Ingresa un DNI válido (8 dígitos) o Carnet de Extranjería (9 a 12 caracteres).",
-        )
-
-    full_name = payload.full_name.strip()
-    destination_code: str | None = None
-    if VISITOR_SERVICES_ENABLED and payload.destination:
-        service = find_villa_service(villa_id, payload.destination)
-        if not service:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"El servicio '{payload.destination}' no existe en {villa_id}.",
-            )
-        destination_code = service.code
-
-    # Un número que YA tiene cuenta (residente, staff o visitante) no puede re-registrarse:
-    # evita que un tercero resetee el PIN de otra persona o suplante a un residente.
-    existing = await user_repo.get_user(villa_id, norm_phone)
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Este número ya tiene una cuenta. Ingresa con tu PIN.",
-        )
-    # Si está precargado como ANCHOR/HOUSEHOLD debe activar su PIN como residente, no como visitante
-    if await lot_repo.list_memberships_by_phone(villa_id, norm_phone):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Este número ya está empadronado en la Villa. Activa tu PIN como residente.",
-        )
-
-    fresh_pin = generate_initial_lot_password()
-    pin_hash = hash_password(fresh_pin)
-
-    await user_repo.upsert_user_account(
-        villa_id=villa_id,
-        username=norm_phone,
-        password_hash=pin_hash,
-        role=UserRole.VISITOR,
-        lot_id=None,
-        full_name=full_name,
-        document_id=cleaned_doc,
-    )
-
-    wa_phone = normalize_peru_phone(norm_phone) or f"51{norm_phone}"
-    sent_ok, channel = await send_whatsapp_pin_notification(
-        phone=wa_phone,
-        villa_id=villa_id,
-        lot_id="VISITANTE",
-        owner_name=full_name,
-        pin_password=fresh_pin,
-    )
-    if not sent_ok:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"No se pudo despachar el PIN de visitante por WhatsApp ({channel}).",
-        )
-
-    log_audit_event(
-        event="AUTH_VISITOR_REGISTERED",
-        actor=f"{villa_id}:{norm_phone}",
-        client_ip=client_ip,
-        user_agent=user_agent,
-        details={
-            "villa_id": villa_id,
-            "phone": norm_phone,
-            "full_name": full_name,
-            "document_id": cleaned_doc,
-            "channel": channel,
-        },
-    )
-
-    return RegisterVisitorResponse(
-        villa_id=villa_id,
-        username=norm_phone,
-        full_name=full_name,
-        document_id=cleaned_doc,
-        role=UserRole.VISITOR,
-        destination=destination_code,
-        delivery_channel=channel,
-        message=(
-            f"Registro completado. Hemos enviado tu PIN de 8 dígitos por WhatsApp al {norm_phone} "
-            "para que generes tu QR de ingreso."
-        ),
-    )
-
-
 @router.post("/login", response_model=TokenResponse)
 async def login(
     payload: LoginRequest,
@@ -589,14 +450,15 @@ async def login(
         effective_name = user.full_name
         effective_role = user.role
         available_lots = [user.lot_id]
-    else:
+    elif user.role in (UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.GUARD):
         effective_lot_id = None
         effective_mem_role = None
         effective_name = user.full_name
-        effective_role = (
-            user.role
-            if user.role in (UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.GUARD)
-            else UserRole.VISITOR
+        effective_role = user.role
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes membresía activa (ANCHOR ni HOUSEHOLD) en esta Villa.",
         )
 
     # 4. Login exitoso: guardar IP para correlación futura y emitir JWT de 30 días sellado para esta Villa

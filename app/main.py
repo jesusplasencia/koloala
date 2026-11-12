@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse
 
 from app.api.v1.auth import router as auth_router
 from app.api.v1.lots import router as lots_router
-from app.api.v1.passes import router as passes_router
+from app.api.v1.visits import router as visits_router
 from app.core.audit import flush_audit_logs_on_shutdown
 from app.core.config import settings
 from app.db.session import check_db_readiness, dispose_db_engine
@@ -52,8 +52,8 @@ app.add_middleware(
 )
 
 app.include_router(auth_router, prefix=settings.api_v1_prefix)
-app.include_router(passes_router, prefix=settings.api_v1_prefix)
 app.include_router(lots_router, prefix=settings.api_v1_prefix)
+app.include_router(visits_router, prefix=settings.api_v1_prefix)
 
 
 def _build_domain_openapi(
@@ -104,9 +104,12 @@ async def openapi_passes_definition() -> dict[str, Any]:
     return _build_domain_openapi(
         title="Las Villas Club - Gatehouse & Passes Definition",
         version="1.0",
-        description="Operación diaria de Garita: Generación de códigos/QR por residentes al día y verificación con DNI + Placa por vigilantes.",
+        description="Garita: QR de visita/taxi/delivery sin cuenta, carnet QR de residentes, vitrina pública y bitácora.",
         allowed_path_prefixes=(
-            f"{settings.api_v1_prefix}/passes",
+            f"{settings.api_v1_prefix}/visits",
+            f"{settings.api_v1_prefix}/guard",
+            f"{settings.api_v1_prefix}/public",
+            f"{settings.api_v1_prefix}/me",
             f"{settings.api_v1_prefix}/auth/change-password",
         ),
     )
@@ -120,6 +123,7 @@ async def openapi_admin_definition() -> dict[str, Any]:
         description="Herramientas exclusivas para la Junta Directiva: Padrón de mantenimiento, Bulk Onboarding y Radar Anti-Password Spraying.",
         allowed_path_prefixes=(
             f"{settings.api_v1_prefix}/lots",
+            f"{settings.api_v1_prefix}/admin",
             f"{settings.api_v1_prefix}/auth/security",
         ),
     )

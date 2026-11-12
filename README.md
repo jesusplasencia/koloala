@@ -51,16 +51,18 @@ Una vez encendido el servidor local en `http://127.0.0.1:8000`:
   - Obtiene su PIN de 8 dígitos por WhatsApp en su primer ingreso.
   - **Permisos estrictos:** Dentro de la aplicación solo puede generar códigos QR de acceso asociados al lote, pero **NO puede agregar ni borrar a ningún integrante del lote (`403 Forbidden`)**.
   - Además, una persona puede ser `ANCHOR` en su propio lote (`Q03`) y simultáneamente `HOUSEHOLD` en el lote de un familiar (`P20`), eligiendo con un toque para qué lote genera el QR.
-- **`VISITOR` (Visitante Externo):**
-  - Si el celular no tiene cuenta (no es `ANCHOR`, `HOUSEHOLD` ni `VISITOR`), se asume **VISITOR** y se inicia su onboarding: **Nombre y Apellido + DNI (8 dígitos) o Carnet de Extranjería (9-12 caracteres)** vía `POST /api/v1/auth/register-visitor`. Recibe su PIN por WhatsApp y genera un QR de visita trazable.
-  - **Seguridad:** nunca se expone el teléfono del Administrador ni de residentes a desconocidos, ni dígitos parciales de ningún número (el celular ya es el username).
-  - Un número con cuenta existente o precargado en el padrón no puede re-registrarse como visitante (`409`), y `/activate-pin` solo funciona para la activación inicial (`409` si ya tiene PIN activo) para evitar resets maliciosos.
-  - **[SHADOW]** Catálogo de servicios internos por Villa (Panadería, Botica, negocios custom como *Marcianos Clarita* o *Brostería Marcos Huamán*) y minimapa: implementado en [`app/models/villa_services.py`](app/models/villa_services.py) pero deshabilitado (`VISITOR_SERVICES_ENABLED = False`).
+- **Visitantes (sin cuenta):** no existe rol VISITOR. Las personas de afuera entran con un QR grupal:
+  - **Invitación** del ANCHOR/HOUSEHOLD (`POST /api/v1/visits/invite`, `kind` = `GUEST` | `TAXI` 30 min | `DELIVERY` 45 min; taxi/delivery exigen placa).
+  - **Cartel de garita = vitrina** de la Villa (`GET /api/v1/public/villa`, `POST /api/v1/public/visits`): MiniLotes (`A01 - Panadería`) y áreas comunes.
+  - **Mesa del guardia** (`POST /api/v1/guard/visits/desk`) para quien no tiene celular.
+  - DNI opcional; verificación `DOC_SHOWN` (físico), `DOC_DIGITAL`, `DECLARED` (de memoria) o `VOUCHED` (avalado por un acompañante). Nadie se queda afuera; todos quedan registrados.
+  - Un número sin cuenta recibe `UNREGISTERED_NO_ACCOUNT` en `/auth/lookup`. Nunca se exponen teléfonos.
 
-### 3. Trazabilidad Forense en cada QR y Bitácora Diaria (`GET /api/v1/passes/daily-log`)
-- Cada pase QR almacena exactamente quién lo generó:
-  - Ejemplo: *"Angel Plasencia (`980180219`), rol `HOUSEHOLD` de `VC3` - Lote `P20`, generó QR para `Amigo Caillou`"*.
-- Tanto **Garita (`GUARD`)** (desde celular o computadora de escritorio) como el **Administrador de la Villa (`ADMIN`)** disponen del endpoint `GET /api/v1/passes/daily-log` para consultar en vivo todos los visitantes y residentes que han ingresado en el día con su rol, lote/destino comercial, DNI, placa vehicular y hora de check-in.
+### 3. Garita y Trazabilidad
+- **Residentes:** Carnet QR rotativo (`GET /api/v1/me/carnet`, cambia cada 30 s). El guardia escanea en `POST /api/v1/guard/resident-entry` y ve *"RESIDENTE: NOMBRE - LOTE"*. El carnet no se gasta; cada ingreso es un evento en `entry_events`.
+- **Visitas:** `GET /api/v1/guard/visits/{qr|código}` + `POST /api/v1/guard/visits/{ref}/check-in`.
+- **Bitácora 24 h** (`GET /api/v1/guard/visits/daily-log`): DNIs enmascarados salvo `?reveal=true` (auditado en `data_access_log`).
+- **Incidentes** (`GET /api/v1/admin/access-search`, solo Admin): por fechas, DNI, placa o destino. A los 90 días los DNIs/placas de visitantes pasan a HMAC (`uv run python -m app.jobs.shadow_visitor_pii`).
 
 ---
 
@@ -68,31 +70,20 @@ Una vez encendido el servidor local en `http://127.0.0.1:8000`:
 
 | Tabla Física | Llave Primaria Compuesta | Llaves Foráneas / Índices | Propósito 3NF |
 | :--- | :--- | :--- | :--- |
-| **`property_lots`** | `(villa_id, lot_id)` | PK Compuesta | Representa únicamente el predio físico y su estado de mantenimiento (`is_maintenance_up_to_date`). |
+| **`property_lots`** | `(villa_id, lot_id)` | PK Compuesta | Predio físico y mantenimiento; `lot_type` (`LOT` / `MINI_LOT` / `COMMON_AREA`), `display_name` e `is_public` para la vitrina. |
 | **`lot_memberships`** | `(villa_id, lot_id, phone)` | `FK -> property_lots(villa_id, lot_id)` + Index `phone` | Relación `N:M` normalizada entre Personas (`phone`) y Lotes (`villa_id, lot_id`) con su rol (`ANCHOR` o `HOUSEHOLD`) y baja lógica (`is_active`) compatible con `koloala_runtime`. |
-| **`users`** | `(villa_id, username)` | Index `username` | Credenciales (`password_hash` PBKDF2-SHA256), `role` (`SUPER_ADMIN`, `ADMIN`, `GUARD`, `RESIDENT`, `VISITOR`), `full_name` y `document_id` (DNI/CE). |
-| **`guest_passes`** | `(villa_id, code)` | Index `lot_id` | Pases QR de un solo uso con trazabilidad completa (`created_by_phone`, `created_by_name`, `created_by_role`, `destination`, `checked_in_dni`, `checked_in_plate`, `checked_in_by_guard`). |
+| **`users`** | `(villa_id, username)` | Index `username` | Credenciales (`password_hash` PBKDF2-SHA256), `role` (`SUPER_ADMIN`, `ADMIN`, `GUARD`, `RESIDENT`), `full_name` y `document_id` (DNI/CE). |
+| **`visit_passes`** | `(villa_id, token)` | `uq (villa_id, short_code)` | QR grupal sin cuenta (`GUEST`/`TAXI`/`DELIVERY`), origen, destino, anfitrión, placa (+HMAC). |
+| **`pass_attendees`** | `(villa_id, token, attendee_no)` | `FK -> visit_passes` + Index `doc_hmac` | Cada persona del grupo: nombres, documento opcional, verificación y aval. |
+| **`entry_events`** | `id` | Index `person_phone`, `at` | Ingresos de residentes con Carnet QR (solo INSERT). |
+| **`data_access_log`** | `id` | Index `villa_id` | Quién consultó DNIs/placas (solo INSERT). |
 | **`ip_security_records`** | `(villa_id, ip_address)` | `uq_villa_ip` | Radar Anti-Fuerza Bruta y Anti-Password Spraying (bloqueo al 3er fallo y correlación de lote sospechoso). |
 
 ---
 
-## 🧪 Cobertura de Pruebas Automatizadas (`test/test_db.py`)
+## 🧪 Cobertura de Pruebas Automatizadas
 
-La suite cuenta con **17 tests de integración exhaustivos** (`uv run pytest -v`):
-1. `test_create_and_verify_pass_happy_path`: Ciclo completo de creación de QR y verificación en garita con DNI y placa.
-2. `test_taxi_requires_plate_without_burning_pass`: Retención en garita si falta placa en Taxi/Delivery sin quemar el pase.
-3. `test_cannot_reuse_already_used_pass`: Protección Single-Use Pass contra reuso de QR.
-4. `test_delinquent_lot_cannot_create_pass`: Bloqueo `403 Forbidden` para lotes con deuda de mantenimiento.
-5. `test_expired_pass_is_denied_at_gatehouse`: Expiración automática por TTL vencido.
-6. `test_pass_denied_if_admin_marks_lot_delinquent_before_arrival`: Revocación en tiempo real en garita si el lote entra en mora.
-7. `test_admin_bulk_upsert_generates_credentials_and_allows_login`: Sincronización masiva de padrón y reseteo Zero-Knowledge.
-8. `test_password_spraying_blocks_attacker_ip_and_identifies_suspect_lot`: Bloqueo de IP al 3er intento fallido e identificación forense.
-9. `test_multi_villa_isolation_between_vc3_and_vc2`: Aislamiento estricto entre Villas para cuentas locales.
-10. `test_lots_pagination_and_filtering`: Paginación de lotes y filtro de morosidad.
-11. `test_audit_gz_rotation_cleanup_and_s3_deletion`: Rotación horaria `.jsonl.gz` y limpieza FinOps para S3.
-12. `test_two_step_login_lookup_and_just_in_time_whatsapp_pin`: Activación Just-In-Time de PIN de 8 dígitos por WhatsApp (Evolution API).
-13. `test_official_phone_admins_916220518_and_934253226`: Verificación de permisos del Super Admin (`916220518`) y Admin de Villa 3 (`934253226`).
-14. `test_anchor_adds_household_angel_plasencia_and_caillou_qr_traceability`: Flujo completo donde `916220518` (`ANCHOR` en `P20`) agrega a `Angel Plasencia` (`980180219`, `HOUSEHOLD`), quien activa su PIN por WhatsApp, genera un QR para `"Amigo Caillou"` con trazabilidad completa y recibe `403 Forbidden` si intenta borrar o agregar miembros al lote.
-15. `test_3nf_multi_lot_and_cross_role_pepito_and_pepita`: Escenario 3NF donde Pepito Juárez es dueño de `P20` y `Q02`, y Pepita Reina es `ANCHOR` de `Q03` y `HOUSEHOLD` de `P20`.
-16. `test_visitor_self_registration_for_bakery_and_daily_log`: Onboarding VISITOR sin exponer teléfonos, bloqueo de suplantación/re-registro (`409`), visitante sin acceso a lotes ajenos ni bitácora (`403`), verificación en garita, bitácora idéntica para Garita y Admin, y aislamiento VC2/VC3.
-17. `test_single_global_phone_password_across_multiple_villas`: Experiencia de contraseña única entre `vc3.lasvillas.club` (`P20`) y `vc2.lasvillas.club` (`M20`).
+`uv run pytest -v` (offline, repos en memoria):
+- `test/test_db.py`: padrón y credenciales, password spraying, aislamiento VC2/VC3, paginación, auditoría `.gz`, login en 2 pasos con PIN por WhatsApp, admins oficiales, ANCHOR/HOUSEHOLD (Angel / Caillou), multi-lote (Pepito / Pepita), número sin cuenta, PIN global multi-villa.
+- `test/test_visits.py`: catálogo y vitrina, invitación familiar sin teléfonos y abuelo avalado, taxi/delivery con placa, pase vencido, lote moroso antes de llegar, cartel público y rate limit, mesa del guardia, aislamiento, búsqueda de incidentes y shadow a 90 días.
+- `test/test_entries.py`: Carnet QR rotativo, carnet vencido/adulterado/de otra villa, baja de HOUSEHOLD, ingreso manual, tope de HOUSEHOLD, `DOC_DIGITAL` y bitácora enmascarada.

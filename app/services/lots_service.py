@@ -3,6 +3,7 @@ import math
 from fastapi import HTTPException, status
 
 from app.core.audit import log_audit_event
+from app.core.config import settings
 from app.core.security import (
     AuthenticatedIdentity,
     generate_initial_lot_password,
@@ -386,6 +387,27 @@ class LotsService:
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Esta persona ya es Persona-Ancla (ANCHOR) del lote; solo el Administrador puede cambiar su rol.",
                 )
+
+        if target_role == MembershipRole.HOUSEHOLD and identity.role not in (
+            UserRole.ADMIN,
+            UserRole.SUPER_ADMIN,
+        ):
+            current = await self.repo.get_membership(norm_villa, norm_lot, norm_phone)
+            if not current or not current.is_active:
+                members = await self.repo.list_lot_members(norm_villa, norm_lot)
+                active_household = sum(
+                    1
+                    for m in members
+                    if m.is_active and m.membership_role == MembershipRole.HOUSEHOLD
+                )
+                if active_household >= settings.max_household_per_lot:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=(
+                            f"El lote {norm_lot} ya tiene {active_household} convivientes activos "
+                            f"(máximo {settings.max_household_per_lot}). Da de baja a alguien o pide ayuda al Administrador."
+                        ),
+                    )
 
         cleaned_doc = payload.document_id.strip().upper() if payload.document_id else None
         membership = await self.repo.upsert_membership(

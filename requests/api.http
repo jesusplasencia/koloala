@@ -39,29 +39,28 @@ X-Forwarded-For: 181.65.20.99
   "password": "admin123"
 }
 
-### 5. [VECINO VC3+B14] Crea un pase con 1 toque (villa_id=VC3 y lot_id=B14 salen del JWT)
+### 5. [VECINO VC3+B14] Crea un QR de Taxi (30 min, placa obligatoria en garita)
 # @name createPass
-POST {{baseUrl}}/api/v1/passes
+POST {{baseUrl}}/api/v1/visits/invite
 Host: vc3.lasvillas.club
 Authorization: Bearer {{loginResidentB14.response.body.access_token}}
 Content-Type: application/json
 X-Forwarded-For: 190.236.10.14
 
 {
-  "pass_type": "TAXI",
-  "visitor_info": "Uber Gris"
+  "kind": "TAXI",
+  "note": "Uber Gris"
 }
 
-### 6. [GARITA VC3] Vigilante verifica el QR/Código de 6 dígitos y registra DNI + Placa
-POST {{baseUrl}}/api/v1/passes/verify
+### 6. [GARITA VC3] Vigilante escanea el QR / código y deja pasar registrando la placa
+POST {{baseUrl}}/api/v1/guard/visits/{{createPass.response.body.short_code}}/check-in
 Host: vc3.lasvillas.club
 Authorization: Bearer {{loginGuard.response.body.access_token}}
 Content-Type: application/json
 X-Forwarded-For: 181.65.20.10
 
 {
-  "code": "{{createPass.response.body.code}}",
-  "visitor_dni": "45891230",
+  "attendees": [{"person": {"first_names": "Chofer", "doc_number": "45891230"}}],
   "vehicle_plate": "B7J-412"
 }
 

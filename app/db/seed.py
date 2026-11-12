@@ -21,10 +21,10 @@ async def seed_vc3_initial_data() -> None:
     now = datetime.now(UTC)
 
     super_admin_phone = "916220518"
-    super_admin_pin = "91622051"
+    super_admin_pin = "15022619"
 
     vc3_admin_phone = "934253226"
-    vc3_admin_pin = "93425322"
+    vc3_admin_pin = "22352439"
 
     legacy_admin_username = "ADMIN"
     legacy_admin_password = "AdminPassword2026!"
@@ -193,10 +193,37 @@ async def seed_vc3_initial_data() -> None:
             )
             session.add(resident_user)
 
+        # 8. Catálogo público de ejemplo (vitrina de garita): MiniLotes y áreas comunes
+        catalog = [
+            # MiniLotes (negocios): prefijo ML
+            ("ML01", "Panadería", "MINI_LOT"),
+            ("ML02", "Botica", "MINI_LOT"),
+            # Áreas comunes / municipales: prefijo CA
+            ("CA01", "Canchita de Fútbol 1", "COMMON_AREA"),
+            ("CA02", "Parque 1", "COMMON_AREA"),
+        ]
+        for code, name, lot_type in catalog:
+            row = await session.get(PropertyLotORM, (villa_id, code))
+            if not row:
+                row = PropertyLotORM(
+                    villa_id=villa_id,
+                    lot_id=code,
+                    owner_name=name,
+                    is_maintenance_up_to_date=True,
+                    created_at=now,
+                )
+                session.add(row)
+            row.lot_type = lot_type
+            row.display_name = name
+            row.is_public = True
+            row.updated_at = now
+
         await session.commit()
 
     print("\n" + "=" * 76)
-    print("[OK] SEED 3NF COMPLETADO EN SUPABASE (Usando rol restringido koloala_runtime)")
+    print(
+        "[OK] SEED 3NF COMPLETADO EN SUPABASE (Usando rol restringido koloala_runtime)"
+    )
     print("=" * 76)
     print(f"Villa: {villa_id} (Villa Club 3)")
     print("-" * 76)

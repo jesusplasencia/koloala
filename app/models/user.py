@@ -9,7 +9,6 @@ class UserRole(StrEnum):
     ADMIN = "ADMIN"
     GUARD = "GUARD"
     RESIDENT = "RESIDENT"
-    VISITOR = "VISITOR"
 
 
 class MembershipRole(StrEnum):
@@ -39,7 +38,7 @@ class User(BaseModel):
     lot_id: str | None = Field(
         default=None,
         examples=["P20", "B14"],
-        description="Lote principal activo o preseleccionado (None para GUARD, ADMIN o VISITOR puro)",
+        description="Lote principal activo o preseleccionado (None para GUARD o ADMIN)",
     )
     full_name: str | None = Field(
         default=None,
@@ -129,7 +128,7 @@ class UserLookupRequest(BaseModel):
 class UserLookupStatus(StrEnum):
     READY_FOR_PASSWORD = "READY_FOR_PASSWORD"
     NEEDS_PHONE_ACTIVATION = "NEEDS_PHONE_ACTIVATION"
-    UNREGISTERED_OFFER_VISITOR = "UNREGISTERED_OFFER_VISITOR"
+    UNREGISTERED_NO_ACCOUNT = "UNREGISTERED_NO_ACCOUNT"
 
 
 class UserLookupResponse(BaseModel):
@@ -140,14 +139,7 @@ class UserLookupResponse(BaseModel):
     role: UserRole | None = None
     membership_role: MembershipRole | None = None
     available_lots: list[str] = Field(default_factory=list)
-    visitor_onboarding_message: str | None = Field(
-        default=None,
-        description="Mensaje de onboarding VISITOR (nunca expone teléfonos de Admin ni residentes)",
-    )
-    available_services: list[dict[str, str]] = Field(
-        default_factory=list,
-        description="Servicios/comercios internos visitables en esta Villa (modo VISITOR)",
-    )
+    message: str | None = None
 
 
 class ActivateLotPinRequest(BaseModel):
@@ -170,46 +162,5 @@ class ActivateLotPinRequest(BaseModel):
 class ActivateLotPinResponse(BaseModel):
     villa_id: str
     lot_id: str
-    delivery_channel: str
-    message: str
-
-
-class RegisterVisitorRequest(BaseModel):
-    phone: str = Field(
-        ...,
-        min_length=9,
-        max_length=20,
-        examples=["955443322"],
-        description="Celular de 9 dígitos del visitante o cliente de comercio interno",
-    )
-    full_name: str = Field(
-        ...,
-        min_length=2,
-        max_length=100,
-        examples=["Carlos Mendoza"],
-        description="Nombre y apellido del visitante para trazabilidad en garita",
-    )
-    document_id: str = Field(
-        ...,
-        min_length=8,
-        max_length=12,
-        examples=["45891230", "001592831"],
-        description="DNI (8 dígitos) o Carnet de Extranjería (9 a 12 caracteres)",
-    )
-    destination: str | None = Field(
-        default=None,
-        max_length=60,
-        examples=["PANADERIA"],
-        description="[SHADOW] Servicio interno a visitar; se ignora mientras el catálogo esté deshabilitado",
-    )
-
-
-class RegisterVisitorResponse(BaseModel):
-    villa_id: str
-    username: str
-    full_name: str
-    document_id: str
-    role: UserRole = UserRole.VISITOR
-    destination: str | None = None
     delivery_channel: str
     message: str

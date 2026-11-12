@@ -2,9 +2,17 @@ import re
 from datetime import datetime
 from urllib.parse import quote
 
+from enum import StrEnum
+
 from pydantic import BaseModel, Field, field_validator
 
 from app.models.user import MembershipRole
+
+
+class LotType(StrEnum):
+    LOT = "LOT"  # Lote residencial (casa)
+    MINI_LOT = "MINI_LOT"  # MiniLote comercial (Panadería, Botica, etc.)
+    COMMON_AREA = "COMMON_AREA"  # Área común / municipal (canchas, parques)
 
 
 def normalize_villa_id(raw_villa_id: str) -> str:
@@ -113,6 +121,19 @@ class PropertyLot(BaseModel):
         description="Correo electrónico del propietario (opcional)",
     )
     is_maintenance_up_to_date: bool
+    lot_type: LotType = Field(
+        default=LotType.LOT,
+        description="LOT (casa), MINI_LOT (negocio) o COMMON_AREA (cancha/parque municipal)",
+    )
+    display_name: str | None = Field(
+        default=None,
+        examples=["A01 - Panadería", "Canchita de Fútbol 1"],
+        description="Nombre visible en el catálogo público de la Villa",
+    )
+    is_public: bool = Field(
+        default=False,
+        description="True si aparece en el catálogo público (vitrina) de la garita",
+    )
     created_at: datetime
     updated_at: datetime
 

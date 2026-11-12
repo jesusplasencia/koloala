@@ -15,29 +15,46 @@ Comandos: `uv sync`, `uv run pytest -q` (offline, repos in-memory), `uv run alem
 ## 2. Modelo de dominio actual (3NF por teléfono)
 - **Identidad = celular de 9 dígitos** (`username`), **un solo PIN de 8 dígitos global** para todas las villas (`vc1..vc5.lasvillas.club`). Villa resuelta por subdominio o header `X-Villa-Id`.
 - Tablas: `property_lots (villa_id, lot_id)`, **`lot_memberships (villa_id, lot_id, phone)`** con FK a lotes, `users (villa_id, username)` con `full_name`/`document_id`, `guest_passes` con trazabilidad (`created_by_phone/name/role`, `destination`, `checked_in_by_guard`), `ip_security_records`.
-- Roles de usuario: `SUPER_ADMIN` (`916220518`, Jesús, global + ANCHOR de VC3-P20), `ADMIN` (`934253226`, admin VC3), `GUARD`, `RESIDENT`, `VISITOR`.
+- Roles de usuario: `SUPER_ADMIN` (`916220518`, Jesús, global + ANCHOR de VC3-P20), `ADMIN` (`934253226`, admin VC3), `GUARD`, `RESIDENT`. **No existe rol VISITOR** (los visitantes entran sin cuenta).
 - Roles por lote: `ANCHOR` (precargado por admin; agrega/da de baja HOUSEHOLD) y `HOUSEHOLD` (solo genera QR; `403` al gestionar miembros).
-- Migración `0002_3nf_memberships` **ya aplicada en Supabase** + seed ejecutado.
+- Migraciones aplastadas en una sola `0001_initial_schema` (2026-11-11). Supabase debe reiniciarse (ver §7).
 
 ## 3. Reglas de seguridad (NO romper)
 - `koloala_runtime` en Postgres solo tiene `SELECT, INSERT, UPDATE` → **nunca `DELETE`**; bajas = `is_active=False`.
 - Nunca guardar PINs en texto plano (PBKDF2).
 - **Nunca exponer teléfonos** de Admin/residentes a desconocidos; **no** devolver dígitos parciales (`masked_phone_hint` eliminado).
-- Número sin cuenta ⇒ se asume **VISITOR** ⇒ onboarding Nombre + DNI (8) / CE (9-12).
-- `register-visitor` → `409` si el número ya tiene cuenta o está precargado en `lot_memberships`.
 - `activate-pin` → solo activación inicial; `409` si ya tiene PIN activo (anti-DoS de resets).
 - Identidad telefónica sin membresía activa ⇒ no puede generar pases aunque tenga JWT vigente (HOUSEHOLD dado de baja).
 - Un ANCHOR no puede degradar a otro ANCHOR vía upsert (`403`).
-- Endpoint `GET /api/v1/passes/daily-log` solo GUARD/ADMIN/SUPER_ADMIN, aislado por villa.
-
-## 4. SHADOW (implementado pero deshabilitado — no activar sin que el usuario lo pida)
-- Catálogo de servicios por villa + minimapa en modo visitante: `app/models/villa_services.py`, flag `VISITOR_SERVICES_ENABLED = False`. Con el flag apagado, los pases de visitante salen con `destination="VISITA"` y `GET /api/v1/auth/villa-services` devuelve 404.
+- Bitácora `GET /api/v1/guard/visits/daily-log` solo GUARD/ADMIN/SUPER_ADMIN, aislada por villa. El sistema viejo `/passes` + `/passes/verify` fue **eliminado**.
 
 ## 5. Estado de pruebas
-`test/test_db.py`: **17 tests pasando**. Se auditaron y endurecieron los tests 12, 14 y 16 (asserts exactos en lugar de `>= 1`, revocación post-baja, anti-replay de activación, bitácora verificada por Guard **y** Admin, aislamiento VC2, visitante sin acceso a lotes ajenos).
+**30 tests pasando** (`test_db.py`, `test_visits.py`, `test_entries.py`). Se auditaron y endurecieron los tests 12, 14 y 16 (asserts exactos en lugar de `>= 1`, revocación post-baja, anti-replay de activación, bitácora verificada por Guard **y** Admin, aislamiento VC2, visitante sin acceso a lotes ajenos).
+
+## 5b. Pases grupales sin cuenta (2026-11-11, migración `0003_group_visits` — **no aplicada aún en Supabase**)
+- El QR es la única puerta de entrada; los visitantes **no** crean cuenta ni dan celular. Código en `app/models/visit.py`, `app/services/visit_service.py`, `app/api/v1/visits.py`, repos `app/repositories/visit_repo.py` / `app/db/visit_repository.py`.
+- Orígenes: `HOST_INVITE` (`POST /visits/invite`), `PUBLIC_KIOSK` (cartel de garita = vitrina: `GET /public/villa`, `POST /public/visits`), `GUARD_DESK` (`POST /guard/visits/desk`).
+- Asistentes con DNI opcional; verificación `DOC_SHOWN` / `DECLARED` / `VOUCHED` (avalado por otro asistente). Sin check-out.
+- MiniLotes/áreas comunes: `property_lots.lot_type` + `display_name` + `is_public`, carga masiva `POST /admin/catalog/bulk`.
+- Privacidad: DNI/placa de visitantes visibles 90 días; job `uv run python -m app.jobs.shadow_visitor_pii` los pasa a HMAC (`PII_HMAC_SECRET`). `GET /admin/access-search` registra cada consulta en `data_access_log` (solo INSERT).
+- Tests: `test/test_visits.py`.
+- **Carnet QR del residente**: `GET /me/carnet` (rota cada 30 s, HMAC con `RESIDENT_QR_SECRET`, por persona, muestra todos sus lotes), `POST /guard/resident-entry` (QR o MANUAL lote+celular; el carnet no se gasta; la deuda solo advierte), `GET /me/entries`. Tabla `entry_events` solo INSERT.
+- Verificación `DOC_DIGITAL`; tope `MAX_HOUSEHOLD_PER_LOT=12` (Admin lo puede superar); bitácora de garita enmascara DNIs salvo `?reveal=true` (auditado). Tests: `test/test_entries.py`.
+- Pendiente: tabla `people` (nombre/DNI fuera de `lot_memberships`) y rate limit del cartel persistido en BD.
 
 ## 6. Próximos pasos sugeridos
-1. **Frontend `fofoala`**: adaptar el login al flujo por celular (`lookup` → `NEEDS_PHONE_ACTIVATION` / `READY_FOR_PASSWORD` / `UNREGISTERED_OFFER_VISITOR`), quitar uso de `masked_phone_hint`, selector multi-lote (`available_lots`, `GET /api/v1/lots/my-memberships`), gestión de HOUSEHOLD para ANCHOR, vista de bitácora diaria para Guard/Admin.
+1. **Frontend `fofoala`**: adaptar el login al flujo por celular (`lookup` → `NEEDS_PHONE_ACTIVATION` / `READY_FOR_PASSWORD` / `UNREGISTERED_NO_ACCOUNT`), pantallas de Carnet QR, invitación (GUEST/TAXI/DELIVERY), página `/v/{token}`, vitrina pública y escáner de garita, quitar uso de `masked_phone_hint`, selector multi-lote (`available_lots`, `GET /api/v1/lots/my-memberships`), gestión de HOUSEHOLD para ANCHOR, vista de bitácora diaria para Guard/Admin.
 2. Encender Railway backend cuando se vaya a demostrar y redeployar desde `dev`.
-3. Futuro: tabla `villa_services` administrable por cada Admin (hoy hardcodeada y en shadow).
+3. Futuro: tabla `people` (nombre/DNI fuera de `lot_memberships`) y rate limit del cartel persistido en BD.
 4. Instructivo visual para el Administrador: `C:\Users\jesus\.gemini\antigravity\brain\b5e639e9-dd22-4f33-88d5-1f529af9be86\instructivo_lasvillas_3nf_1794358815306.jpg` (**desactualizado**: aún menciona el badge de contacto con el admin, que fue eliminado por seguridad; regenerar).
+
+## 7. Reiniciar Supabase (desarrollo)
+SQL Editor de Supabase (como `postgres`):
+```sql
+DROP TABLE IF EXISTS
+  entry_events, data_access_log, pass_attendees, visit_passes,
+  guest_passes, ip_security_records, users, lot_memberships,
+  property_lots, alembic_version
+CASCADE;
+```
+Luego: `uv run alembic upgrade head` y `uv run python -m app.db.seed`. Definir en Railway `PII_HMAC_SECRET` y `RESIDENT_QR_SECRET`.

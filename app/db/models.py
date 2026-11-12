@@ -34,6 +34,9 @@ class PropertyLotORM(Base):
     is_maintenance_up_to_date: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True
     )
+    lot_type: Mapped[str] = mapped_column(String(20), nullable=False, default="LOT")
+    display_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    is_public: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
@@ -83,7 +86,7 @@ class LotMembershipORM(Base):
 class UserORM(Base):
     """
     Tabla 'users' con Llave Primaria Compuesta (villa_id, username).
-    Soporta SUPER_ADMIN ('916220518'), ADMIN ('934253226'), GUARD, RESIDENT y VISITOR.
+    Soporta SUPER_ADMIN ('916220518'), ADMIN ('934253226'), GUARD y RESIDENT.
     """
 
     __tablename__ = "users"
@@ -109,41 +112,6 @@ class UserORM(Base):
     )
 
 
-class GuestPassORM(Base):
-    """
-    Tabla 'guest_passes' con Llave Primaria Compuesta (villa_id, code).
-    Guarda el ciclo de vida del código/QR, la trazabilidad de quién lo creó
-    (created_by_phone, created_by_name, created_by_role) y el cierre del vigilante en garita.
-    """
-
-    __tablename__ = "guest_passes"
-
-    villa_id: Mapped[str] = mapped_column(String(15), primary_key=True)
-    code: Mapped[str] = mapped_column(String(10), primary_key=True)
-    lot_id: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
-    pass_type: Mapped[str] = mapped_column(String(20), nullable=False)
-    visitor_info: Mapped[str] = mapped_column(String(100), nullable=False)
-    destination: Mapped[str] = mapped_column(
-        String(60), nullable=False, default="Lote"
-    )
-    created_by_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    created_by_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    created_by_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    used_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    checked_in_dni: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    checked_in_plate: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    checked_in_by_guard: Mapped[str | None] = mapped_column(String(30), nullable=True)
-
-
 class IPSecurityRecordORM(Base):
     """
     Tabla 'ip_security_records' con Llave Primaria Compuesta (villa_id, ip_address).
@@ -167,3 +135,107 @@ class IPSecurityRecordORM(Base):
         DateTime(timezone=True), nullable=True
     )
     last_user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class VisitPassORM(Base):
+    """
+    Tabla 'visit_passes': QR grupal sin cuenta (invitación de residente, cartel público o mesa de garita).
+    El token es un secreto aleatorio (va dentro del QR); short_code (6) sirve para digitarlo a mano.
+    """
+
+    __tablename__ = "visit_passes"
+    __table_args__ = (
+        UniqueConstraint("villa_id", "short_code", name="uq_visit_passes_short_code"),
+    )
+
+    villa_id: Mapped[str] = mapped_column(String(15), primary_key=True)
+    token: Mapped[str] = mapped_column(String(64), primary_key=True)
+    short_code: Mapped[str] = mapped_column(String(10), nullable=False)
+    origin: Mapped[str] = mapped_column(String(20), nullable=False)
+    kind: Mapped[str] = mapped_column(String(15), nullable=False, default="GUEST")
+    destination_lot_id: Mapped[str] = mapped_column(String(15), nullable=False, index=True)
+    destination_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    destination_label: Mapped[str] = mapped_column(String(100), nullable=False)
+    host_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    host_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    host_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    party_size_expected: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    note: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    vehicle_plate: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    plate_hmac: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    checked_in_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    checked_in_by_guard: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    shadowed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PassAttendeeORM(Base):
+    """
+    Tabla 'pass_attendees': cada persona del grupo (NOMBRES, APELLIDOS, DNI opcional).
+    Tras 90 días el doc_number se borra por UPDATE y queda solo doc_hmac + doc_last2.
+    """
+
+    __tablename__ = "pass_attendees"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["villa_id", "token"],
+            ["visit_passes.villa_id", "visit_passes.token"],
+            name="fk_pass_attendees_visit_pass",
+        ),
+    )
+
+    villa_id: Mapped[str] = mapped_column(String(15), primary_key=True)
+    token: Mapped[str] = mapped_column(String(64), primary_key=True)
+    attendee_no: Mapped[int] = mapped_column(Integer, primary_key=True)
+    first_names: Mapped[str] = mapped_column(String(80), nullable=False)
+    last_names: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    doc_type: Mapped[str] = mapped_column(String(15), nullable=False, default="NINGUNO")
+    doc_number: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    doc_hmac: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    doc_last2: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    verification: Mapped[str | None] = mapped_column(String(15), nullable=True)
+    vouched_by_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    checked_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    checked_in_by_guard: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    shadowed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DataAccessLogORM(Base):
+    """Tabla 'data_access_log' (solo INSERT): quién consultó DNIs/placas, cuándo y con qué filtro."""
+
+    __tablename__ = "data_access_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    villa_id: Mapped[str] = mapped_column(String(15), nullable=False, index=True)
+    actor: Mapped[str] = mapped_column(String(30), nullable=False)
+    actor_role: Mapped[str] = mapped_column(String(20), nullable=False)
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    filters: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    result_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    client_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+
+
+class EntryEventORM(Base):
+    """Tabla 'entry_events' (solo INSERT): cada ingreso de un residente con su Carnet QR o manual."""
+
+    __tablename__ = "entry_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    villa_id: Mapped[str] = mapped_column(String(15), nullable=False, index=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    person_phone: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    person_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    lots: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    method: Mapped[str] = mapped_column(String(10), nullable=False)
+    guard: Mapped[str] = mapped_column(String(30), nullable=False)
+    vehicle_plate: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    plate_hmac: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
