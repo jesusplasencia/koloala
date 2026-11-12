@@ -198,6 +198,7 @@ class PassAttendeeORM(Base):
     doc_number: Mapped[str | None] = mapped_column(String(20), nullable=True)
     doc_hmac: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     doc_last2: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    doc_source: Mapped[str | None] = mapped_column(String(10), nullable=True)
     verification: Mapped[str | None] = mapped_column(String(15), nullable=True)
     vouched_by_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
     checked_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

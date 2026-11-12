@@ -26,9 +26,8 @@ class Settings(BaseSettings):
 
     # Pases grupales sin cuenta (QR de invitación / cartel público de garita)
     visit_invite_max_hours: int = 72  # Ventana máxima que un residente puede dar a su invitación
-    visit_public_ttl_hours: int = 6  # Vigencia del QR sacado en el cartel de garita
+    visit_desk_ttl_hours: int = 6  # Vigencia del registro hecho en la mesa de garita
     visit_max_attendees: int = 20
-    public_visits_per_ip_per_hour: int = 15
     # Privacidad (Ley 29733): DNIs/placas de visitantes visibles N días, luego shadow (HMAC)
     visitor_pii_retention_days: int = 90
     pii_hmac_secret: str = "vc-koloala-pii-hmac-secret-change-in-production-2026"

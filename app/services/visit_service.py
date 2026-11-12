@@ -1,7 +1,5 @@
 import secrets
 import string
-import time
-from collections import defaultdict, deque
 from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, status
@@ -23,7 +21,7 @@ from app.models.visit import (
     CatalogItem,
     CheckInRequest,
     CreateInviteRequest,
-    CreatePublicVisitRequest,
+    DocSource,
     DocType,
     GuardAttendeeView,
     GuardDeskVisitRequest,
@@ -44,26 +42,6 @@ from app.services.entry_service import EntryService
 _CODE_ALPHABET = "".join(c for c in string.ascii_uppercase + string.digits if c not in "O0I1")
 
 
-class PublicRateLimiter:
-    """Límite simple por IP+Villa para el cartel público (por proceso)."""
-
-    def __init__(self) -> None:
-        self._hits: dict[str, deque[float]] = defaultdict(deque)
-
-    def check(self, key: str, limit: int, window_s: int = 3600) -> bool:
-        now = time.monotonic()
-        q = self._hits[key]
-        while q and now - q[0] > window_s:
-            q.popleft()
-        if len(q) >= limit:
-            return False
-        q.append(now)
-        return True
-
-
-public_rate_limiter = PublicRateLimiter()
-
-
 def _label(lot: PropertyLot) -> str:
     if lot.lot_type == LotType.LOT:
         return f"Lote {lot.lot_id}"
@@ -71,11 +49,8 @@ def _label(lot: PropertyLot) -> str:
 
 
 class VisitService:
-    def __init__(
-        self, repo: VisitRepositoryProtocol, limiter: PublicRateLimiter | None = None
-    ) -> None:
+    def __init__(self, repo: VisitRepositoryProtocol) -> None:
         self.repo = repo
-        self.limiter = limiter or public_rate_limiter
 
     # ---------- helpers ----------
     def _short_code(self) -> str:
@@ -90,6 +65,7 @@ class VisitService:
             doc_number=person.doc_number,
             doc_hmac=pii_hmac(person.doc_number),
             doc_last2=person.doc_number[-2:] if person.doc_number else None,
+            doc_source=person.doc_source or (DocSource.MANUAL if person.doc_number else None),
             created_at=now,
         )
 
@@ -181,6 +157,7 @@ class VisitService:
                     full_name=a.full_name,
                     doc_type=a.doc_type,
                     doc_display=mask_doc(a.doc_number if reveal else None, a.doc_last2),
+                    doc_source=a.doc_source,
                     verification=a.verification,
                     vouched_by_no=a.vouched_by_no,
                     checked_in_at=a.checked_in_at,
@@ -313,48 +290,6 @@ class VisitService:
             share_path=f"/v/{visit.token}",
         )
 
-    # ---------- cartel público de garita ----------
-    async def create_public_visit(
-        self, villa_id: str, payload: CreatePublicVisitRequest, client_ip: str
-    ) -> InviteResponse:
-        norm = normalize_villa_id(villa_id)
-        if not self.limiter.check(f"{norm}:{client_ip}", settings.public_visits_per_ip_per_hour):
-            raise HTTPException(
-                status.HTTP_429_TOO_MANY_REQUESTS,
-                "Demasiados pases desde esta conexión. Acércate a la garita.",
-            )
-        lot = await self._public_destination(norm, payload.destination_lot_id)
-        now = datetime.now(UTC)
-        visit = await self._new_visit(
-            norm,
-            VisitOrigin.PUBLIC_KIOSK,
-            lot,
-            valid_from=now,
-            valid_until=now + timedelta(hours=settings.visit_public_ttl_hours),
-            party_size=len(payload.attendees),
-            plate=payload.vehicle_plate,
-        )
-        self._append_attendees(visit, payload.attendees)
-        await self.repo.save_visit(visit)
-        log_audit_event(
-            event="VISIT_PUBLIC_CREATED",
-            actor=f"{norm}:PUBLIC",
-            client_ip=client_ip,
-            user_agent="kiosk",
-            details={"villa_id": norm, "code": visit.short_code, "destination": lot.lot_id,
-                     "party_size": len(visit.attendees)},
-        )
-        return InviteResponse(
-            token=visit.token,
-            short_code=visit.short_code,
-            villa_id=norm,
-            destination_label=visit.destination_label,
-            party_size_expected=visit.party_size_expected,
-            valid_from=visit.valid_from,
-            valid_until=visit.valid_until,
-            share_path=f"/v/{visit.token}",
-        )
-
     async def _get_or_404(self, villa_id: str, token: str) -> VisitPass:
         visit = await self.repo.get_visit(normalize_villa_id(villa_id), token)
         if not visit:
@@ -424,6 +359,7 @@ class VisitService:
                     att.first_names, att.last_names = fresh.first_names, fresh.last_names
                     att.doc_type, att.doc_number = fresh.doc_type, fresh.doc_number
                     att.doc_hmac, att.doc_last2 = fresh.doc_hmac, fresh.doc_last2
+                    att.doc_source = fresh.doc_source
             else:
                 assert entry.person is not None
                 self._append_attendees(visit, [entry.person])
@@ -504,11 +440,18 @@ class VisitService:
     async def guard_desk_visit(
         self, villa_id: str, payload: GuardDeskVisitRequest, guard: AuthenticatedIdentity
     ) -> GuardPassView:
-        """El vigilante registra en su tablet a quien no tiene celular (mismo formulario)."""
+        """Visitante sin invitación: el vigilante registra su DNI (foto del reverso u OCR o a mano)
+        hacia un servicio del catálogo público. Las casas solo reciben visitas con invitación."""
         norm = normalize_villa_id(villa_id)
         lot = await self.repo.get_lot(norm, payload.destination_lot_id)
         if not lot:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Destino no encontrado en la Villa.")
+        if lot.lot_type == LotType.LOT or not lot.is_public:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "En mesa solo se registran ingresos a servicios del catálogo. "
+                "Para visitar una casa, el residente debe enviar su invitación QR.",
+            )
         if any(e.attendee_no is not None for e in payload.attendees):
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -520,7 +463,7 @@ class VisitService:
             VisitOrigin.GUARD_DESK,
             lot,
             valid_from=now,
-            valid_until=now + timedelta(hours=settings.visit_public_ttl_hours),
+            valid_until=now + timedelta(hours=settings.visit_desk_ttl_hours),
             party_size=len(payload.attendees),
             host=(None, None, "GUARD"),
         )

@@ -12,7 +12,7 @@ from app.models.user import AttackType, UserRole
 from app.repositories.visit_repo import InMemoryVisitRepository
 from app.repositories.lots_repo import InMemoryLotRepository
 from app.repositories.users_repo import InMemoryUserRepository
-from app.services.visit_service import PublicRateLimiter, VisitService
+from app.services.visit_service import VisitService
 from app.services.lots_service import LotsService
 
 
@@ -44,7 +44,7 @@ async def client(
     user_repo: InMemoryUserRepository,
 ):
     """Inyecta los 3 repositorios limpios en FastAPI durante la ejecución de cada test."""
-    app.dependency_overrides[get_visit_service] = lambda: VisitService(repo, PublicRateLimiter())
+    app.dependency_overrides[get_visit_service] = lambda: VisitService(repo)
     app.dependency_overrides[get_lots_service] = lambda: LotsService(
         repo=lot_repo, user_repo=user_repo
     )

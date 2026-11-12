@@ -18,7 +18,7 @@ from app.repositories.users_repo import InMemoryUserRepository
 from app.repositories.visit_repo import InMemoryVisitRepository
 from app.services.entry_service import build_carnet_payload
 from app.services.lots_service import LotsService
-from app.services.visit_service import PublicRateLimiter, VisitService
+from app.services.visit_service import VisitService
 
 API = "/api/v1"
 
@@ -47,7 +47,7 @@ def visit_repo(lot_repo) -> InMemoryVisitRepository:
 
 @pytest.fixture
 async def client(lot_repo, visit_repo):
-    app.dependency_overrides[get_visit_service] = lambda: VisitService(visit_repo, PublicRateLimiter())
+    app.dependency_overrides[get_visit_service] = lambda: VisitService(visit_repo)
     app.dependency_overrides[get_lots_service] = lambda: LotsService(
         repo=lot_repo, user_repo=InMemoryUserRepository()
     )

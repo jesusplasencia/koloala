@@ -161,8 +161,8 @@ async def lookup_user_login_state(
             username=norm_username,
             status=UserLookupStatus.UNREGISTERED_NO_ACCOUNT,
             message=(
-                "Este número no tiene cuenta. Si vienes de visita, pide a tu anfitrión "
-                "un QR o escanea el cartel de la garita."
+                "Este número no tiene cuenta. Si visitas una casa, pide a tu anfitrión "
+                "su QR; si vas a un negocio o área común, acércate a garita con tu DNI."
             ),
         )
 

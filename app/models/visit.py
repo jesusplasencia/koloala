@@ -1,9 +1,9 @@
 """Pases grupales sin cuenta: el QR es la única puerta de entrada.
 
 - HOST_INVITE: un ANCHOR/HOUSEHOLD invita a su lote (familia de Canadá a la P20). No se piden celulares.
-- PUBLIC_KIOSK: el visitante escanea el cartel de la garita, ve la vitrina de la Villa
-  (MiniLotes y áreas comunes) y saca su QR.
-- GUARD_DESK: el vigilante llena el mismo formulario por quien no tiene celular.
+- GUARD_DESK: quien llega sin invitación muestra su DNI físico; el vigilante fotografía el
+  reverso (OCR en su teléfono, la foto NO se guarda) y registra el ingreso a un servicio del catálogo.
+  No se genera QR para el visitante: queda un registro formal.
 
 Nadie se queda afuera por no traer DNI físico: se registra cómo se verificó su identidad.
 """
@@ -21,7 +21,6 @@ from app.models.lot import LotType
 
 class VisitOrigin(StrEnum):
     HOST_INVITE = "HOST_INVITE"
-    PUBLIC_KIOSK = "PUBLIC_KIOSK"
     GUARD_DESK = "GUARD_DESK"
 
 
@@ -42,6 +41,11 @@ class DocType(StrEnum):
     CE = "CE"
     PASAPORTE = "PASAPORTE"
     NINGUNO = "NINGUNO"
+
+
+class DocSource(StrEnum):
+    OCR = "OCR"  # Leído de la foto del reverso del DNI (MRZ) en el teléfono del vigilante
+    MANUAL = "MANUAL"  # Escrito a mano
 
 
 class Verification(StrEnum):
@@ -67,6 +71,7 @@ class Attendee(BaseModel):
     doc_number: str | None = None
     doc_hmac: str | None = None
     doc_last2: str | None = None
+    doc_source: DocSource | None = None
     verification: Verification | None = None
     vouched_by_no: int | None = None
     checked_in_at: datetime | None = None
@@ -113,6 +118,9 @@ class AttendeeInput(BaseModel):
         default=None, description="Si se omite: DNI cuando hay número, NINGUNO cuando no"
     )
     doc_number: str | None = Field(default=None, max_length=20, examples=["60998877"])
+    doc_source: DocSource | None = Field(
+        default=None, description="OCR si se leyó de la foto del DNI; MANUAL si se escribió"
+    )
 
     @field_validator("first_names", "last_names", mode="before")
     @classmethod
@@ -152,12 +160,6 @@ class CreateInviteRequest(BaseModel):
         max_length=20,
         description="Opcional: nombres precargados; si no, se completan en el enlace o en garita",
     )
-
-
-class CreatePublicVisitRequest(BaseModel):
-    destination_lot_id: str = Field(..., max_length=15, examples=["A01"])
-    attendees: list[AttendeeInput] = Field(..., min_length=1, max_length=20)
-    vehicle_plate: str | None = Field(default=None, max_length=15)
 
 
 class AddAttendeesRequest(BaseModel):
@@ -256,6 +258,7 @@ class GuardAttendeeView(BaseModel):
     full_name: str
     doc_type: DocType
     doc_display: str | None
+    doc_source: DocSource | None = None
     verification: Verification | None
     vouched_by_no: int | None
     checked_in_at: datetime | None

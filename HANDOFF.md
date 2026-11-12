@@ -33,7 +33,7 @@ Comandos: `uv sync`, `uv run pytest -q` (offline, repos in-memory), `uv run alem
 
 ## 5b. Pases grupales sin cuenta (2026-11-11, migración `0003_group_visits` — **no aplicada aún en Supabase**)
 - El QR es la única puerta de entrada; los visitantes **no** crean cuenta ni dan celular. Código en `app/models/visit.py`, `app/services/visit_service.py`, `app/api/v1/visits.py`, repos `app/repositories/visit_repo.py` / `app/db/visit_repository.py`.
-- Orígenes: `HOST_INVITE` (`POST /visits/invite`), `PUBLIC_KIOSK` (cartel de garita = vitrina: `GET /public/villa`, `POST /public/visits`), `GUARD_DESK` (`POST /guard/visits/desk`).
+- Orígenes: `HOST_INVITE` (`POST /visits/invite`) y `GUARD_DESK` (`POST /guard/visits/desk`, solo hacia servicios ML/CA públicos). **Ya no existe autoservicio** (`POST /public/visits` eliminado): quien llega sin invitación muestra su DNI físico, el vigilante fotografía el reverso, el OCR (MRZ, tesseract.js en el teléfono) rellena nombres/apellidos/DNI y la foto se descarta. `pass_attendees.doc_source` = `OCR`/`MANUAL` (migración `0002_attendee_doc_source`, aplicada). `GET /public/villa` queda como vitrina informativa.
 - Asistentes con DNI opcional; verificación `DOC_SHOWN` / `DECLARED` / `VOUCHED` (avalado por otro asistente). Sin check-out.
 - MiniLotes/áreas comunes: `property_lots.lot_type` + `display_name` + `is_public`, carga masiva `POST /admin/catalog/bulk`.
 - Privacidad: DNI/placa de visitantes visibles 90 días; job `uv run python -m app.jobs.shadow_visitor_pii` los pasa a HMAC (`PII_HMAC_SECRET`). `GET /admin/access-search` registra cada consulta en `data_access_log` (solo INSERT).

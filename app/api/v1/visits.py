@@ -24,7 +24,6 @@ from app.models.visit import (
     CatalogBulkResponse,
     CheckInRequest,
     CreateInviteRequest,
-    CreatePublicVisitRequest,
     GuardDeskVisitRequest,
     GuardPassView,
     InviteResponse,
@@ -60,17 +59,6 @@ VisitServiceDep = Annotated[VisitService, Depends(get_visit_service)]
 async def public_villa_catalog(villa_id: VillaIdDep, service: VisitServiceDep) -> PublicVillaResponse:
     """Vitrina de la Villa (cartel QR de garita): MiniLotes y áreas comunes. Nunca expone datos de residentes."""
     return await service.public_villa(villa_id)
-
-
-@router.post("/public/visits", response_model=InviteResponse, status_code=status.HTTP_201_CREATED)
-async def create_public_visit(
-    payload: CreatePublicVisitRequest,
-    request: Request,
-    villa_id: VillaIdDep,
-    service: VisitServiceDep,
-) -> InviteResponse:
-    """El visitante elige destino del catálogo y registra a su grupo (DNI opcional). Sin cuenta ni celular."""
-    return await service.create_public_visit(villa_id, payload, get_client_ip(request))
 
 
 @router.get("/public/visits/{token}", response_model=PublicPassView)

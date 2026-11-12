@@ -11,7 +11,7 @@ from app.main import app
 from app.models.user import MembershipRole, UserRole
 from app.repositories.lots_repo import InMemoryLotRepository
 from app.repositories.visit_repo import InMemoryVisitRepository
-from app.services.visit_service import PublicRateLimiter, VisitService
+from app.services.visit_service import VisitService
 
 API = "/api/v1"
 
@@ -39,8 +39,7 @@ def visit_repo() -> InMemoryVisitRepository:
 
 @pytest.fixture
 async def client(visit_repo: InMemoryVisitRepository):
-    limiter = PublicRateLimiter()
-    app.dependency_overrides[get_visit_service] = lambda: VisitService(visit_repo, limiter)
+    app.dependency_overrides[get_visit_service] = lambda: VisitService(visit_repo)
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://vc3.lasvillas.club"
     ) as ac:
@@ -188,57 +187,57 @@ async def test_voucher_must_be_another_attendee_entering(client: AsyncClient):
     assert ok.status_code == 200 and ok.json()["attendees"][0]["verification"] == "DECLARED"
 
 
-async def test_public_kiosk_to_bakery_and_validation(client: AsyncClient):
+async def test_visitors_cannot_self_issue_qr(client: AsyncClient):
     await _seed_catalog(client)
     r = await client.post(
         f"{API}/public/visits",
-        json={"destination_lot_id": "a1", "attendees": [
-            {"first_names": "Jesus Manuel", "last_names": "Plasencia", "doc_number": "60998877"}]},
+        json={"destination_lot_id": "A01", "attendees": [{"first_names": "X"}]},
     )
-    assert r.status_code == 201, r.text
-    assert r.json()["destination_label"] == "A01 - Panadería"
-
-    for dest in ("B14", "A03", "ZZ9"):  # casa, oculto, inexistente
-        bad = await client.post(
-            f"{API}/public/visits",
-            json={"destination_lot_id": dest, "attendees": [{"first_names": "X"}]},
-        )
-        assert bad.status_code == 404, dest
-
-    bad_dni = await client.post(
-        f"{API}/public/visits",
-        json={"destination_lot_id": "A01", "attendees": [{"first_names": "X", "doc_number": "123"}]},
-    )
-    assert bad_dni.status_code == 422
-
-    ci = await client.post(
-        f"{API}/guard/visits/{r.json()['token']}/check-in", headers=GUARD,
-        json={"attendees": [{"attendee_no": 1}]},
-    )
-    assert ci.status_code == 200
-    assert ci.json()["attendees"][0]["full_name"] == "JESUS MANUEL PLASENCIA"
+    assert r.status_code in (404, 405)
 
 
-async def test_public_rate_limit(client: AsyncClient, monkeypatch):
-    from app.core.config import settings
-
-    await _seed_catalog(client)
-    monkeypatch.setattr(settings, "public_visits_per_ip_per_hour", 2)
-    payload = {"destination_lot_id": "A01", "attendees": [{"first_names": "X"}]}
-    codes = [(await client.post(f"{API}/public/visits", json=payload)).status_code for _ in range(3)]
-    assert codes == [201, 201, 429]
-
-
-async def test_guard_desk_for_person_without_phone(client: AsyncClient):
+async def test_guard_desk_ocr_dni_to_bakery(client: AsyncClient):
+    """Visitante sin invitación: el vigilante lee el reverso del DNI (OCR) y lo registra a un servicio."""
     await _seed_catalog(client)
     r = await client.post(
         f"{API}/guard/visits/desk", headers=GUARD,
-        json={"destination_lot_id": "CF1", "vehicle_plate": "b7j-412", "attendees": [
-            {"person": {"first_names": "Rosa", "last_names": "Quispe", "doc_number": "12345678"}}]},
+        json={"destination_lot_id": "a1", "vehicle_plate": "b7j-412", "attendees": [
+            {"person": {"first_names": "Jesus Manuel", "last_names": "Plasencia",
+                        "doc_number": "60998877", "doc_source": "OCR"}},
+            {"person": {"first_names": "Rosa", "last_names": "Quispe"}}]},
     )
     assert r.status_code == 201, r.text
-    assert r.json()["origin"] == "GUARD_DESK" and r.json()["status"] == "USED"
-    assert r.json()["vehicle_plate"] == "B7J412"
+    body = r.json()
+    assert body["origin"] == "GUARD_DESK" and body["status"] == "USED"
+    assert body["destination_label"] == "A01 - Panadería"
+    assert body["vehicle_plate"] == "B7J412"
+    first, second = body["attendees"]
+    assert first["full_name"] == "JESUS MANUEL PLASENCIA"
+    assert first["doc_source"] == "OCR" and first["verification"] == "DOC_SHOWN"
+    assert second["doc_source"] is None and second["verification"] == "DECLARED"
+
+    manual = await client.post(
+        f"{API}/guard/visits/desk", headers=GUARD,
+        json={"destination_lot_id": "CF1", "attendees": [
+            {"person": {"first_names": "Ana", "doc_number": "12345678"}}]},
+    )
+    assert manual.json()["attendees"][0]["doc_source"] == "MANUAL"
+
+
+async def test_guard_desk_only_catalog_services(client: AsyncClient):
+    await _seed_catalog(client)
+    entry = {"attendees": [{"person": {"first_names": "X"}}]}
+    house = await client.post(f"{API}/guard/visits/desk", headers=GUARD, json={"destination_lot_id": "B14", **entry})
+    assert house.status_code == 422 and "invitación" in house.json()["detail"]
+    hidden = await client.post(f"{API}/guard/visits/desk", headers=GUARD, json={"destination_lot_id": "A03", **entry})
+    assert hidden.status_code == 422
+    missing = await client.post(f"{API}/guard/visits/desk", headers=GUARD, json={"destination_lot_id": "ZZ9", **entry})
+    assert missing.status_code == 404
+    bad_dni = await client.post(
+        f"{API}/guard/visits/desk", headers=GUARD,
+        json={"destination_lot_id": "A01", "attendees": [{"person": {"first_names": "X", "doc_number": "123"}}]},
+    )
+    assert bad_dni.status_code == 422
 
 
 async def test_villa_isolation(client: AsyncClient):

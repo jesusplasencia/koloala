@@ -17,6 +17,7 @@ from app.models.lot import LotType, PropertyLot, normalize_lot_id, normalize_vil
 from app.models.visit import (
     Attendee,
     CatalogBulkItem,
+    DocSource,
     DocType,
     Verification,
     VisitKind,
@@ -54,6 +55,7 @@ _ATTENDEE_FIELDS = (
     "doc_number",
     "doc_hmac",
     "doc_last2",
+    "doc_source",
     "verification",
     "vouched_by_no",
     "checked_in_at",
@@ -143,6 +145,7 @@ class PostgresVisitRepository(PostgresMembershipLookup):
                     doc_number=a.doc_number,
                     doc_hmac=a.doc_hmac,
                     doc_last2=a.doc_last2,
+                    doc_source=DocSource(a.doc_source) if a.doc_source else None,
                     verification=Verification(a.verification) if a.verification else None,
                     vouched_by_no=a.vouched_by_no,
                     checked_in_at=a.checked_in_at,
