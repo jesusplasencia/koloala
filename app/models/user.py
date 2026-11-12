@@ -74,7 +74,7 @@ class LoginRequest(BaseModel):
     password: str = Field(
         ...,
         min_length=4,
-        max_length=100,
+        max_length=64,
         examples=["48291057"],
     )
 
@@ -96,8 +96,13 @@ class TokenResponse(BaseModel):
 
 
 class ChangePasswordRequest(BaseModel):
-    current_password: str = Field(..., min_length=4, max_length=100)
-    new_password: str = Field(..., min_length=6, max_length=100)
+    current_password: str = Field(..., min_length=4, max_length=64)
+    new_password: str = Field(
+        ...,
+        min_length=8,
+        max_length=64,
+        description="8 a 64 caracteres: letras, números, símbolos o espacios (NIST SP 800-63B)",
+    )
 
 
 class BlockedIPReport(BaseModel):
@@ -150,12 +155,11 @@ class ActivateLotPinRequest(BaseModel):
         examples=["980180219", "P21"],
         description="Número de celular o lote a activar por primera vez",
     )
-    phone: str = Field(
-        ...,
-        min_length=6,
+    phone: str | None = Field(
+        default=None,
         max_length=30,
-        examples=["980180219", "987654321"],
-        description="Confirmación del número de WhatsApp donde recibirá su PIN de 8 dígitos",
+        examples=["980180219"],
+        description="Opcional: si el username ya es el celular de 9 dígitos, se usa ese mismo número",
     )
 
 

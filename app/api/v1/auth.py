@@ -236,7 +236,11 @@ async def activate_lot_pin_via_whatsapp(
             ),
         )
 
-    provided_phone = normalize_peru_phone(payload.phone)
+    # El username ya es el celular: no se le vuelve a pedir el número al vecino.
+    raw_phone = payload.phone
+    if not (raw_phone and raw_phone.strip()) and norm_username.isdigit() and len(norm_username) == 9:
+        raw_phone = norm_username
+    provided_phone = normalize_peru_phone(raw_phone)
 
     if not expected_phone or expected_phone != provided_phone:
         failure_report = await user_repo.record_login_failure(

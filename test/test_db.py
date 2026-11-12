@@ -614,10 +614,10 @@ async def test_anchor_adds_household_angel_plasencia_and_caillou_qr_traceability
     assert angel_lookup.json()["membership_role"] == "HOUSEHOLD"
     assert angel_lookup.json()["available_lots"] == ["P20"]
 
-    # 4. Angel activa su PIN por WhatsApp (Evolution API) e inicia sesión con su celular
+    # 4. Angel activa su PIN por WhatsApp sin re-escribir su celular (el username ya es el número)
     angel_act = await client.post(
         "/api/v1/auth/activate-pin",
-        json={"username": "980180219", "phone": "980180219"},
+        json={"username": "980180219"},
     )
     assert angel_act.status_code == 200
     angel_pin = captured_pins["51980180219"]
@@ -632,6 +632,25 @@ async def test_anchor_adds_household_angel_plasencia_and_caillou_qr_traceability
     assert angel_token_data["membership_role"] == "HOUSEHOLD"
     assert angel_token_data["full_name"] == "Angel Plasencia"
     angel_headers = {"Authorization": f"Bearer {angel_token_data['access_token']}"}
+
+    # 4b. Angel cambia su PIN numérico por una contraseña propia (8-64 caracteres, no solo números)
+    too_short = await client.post(
+        "/api/v1/auth/change-password",
+        headers=angel_headers,
+        json={"current_password": angel_pin, "new_password": "abc12"},
+    )
+    assert too_short.status_code == 422
+    changed = await client.post(
+        "/api/v1/auth/change-password",
+        headers=angel_headers,
+        json={"current_password": angel_pin, "new_password": "Navidad en P20!"},
+    )
+    assert changed.status_code == 200
+    relogin = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "980180219", "password": "Navidad en P20!"},
+    )
+    assert relogin.status_code == 200
 
     # 5. Como HOUSEHOLD, Angel genera un QR para la visita de "Amigo Caillou"
     qr_resp = await client.post(
@@ -691,7 +710,7 @@ async def test_anchor_adds_household_angel_plasencia_and_caillou_qr_traceability
     # 9. Angel ya activó su PIN: nadie puede forzar un nuevo reset por /activate-pin (anti-DoS)
     replay = await client.post(
         "/api/v1/auth/activate-pin",
-        json={"username": "980180219", "phone": "980180219"},
+        json={"username": "980180219"},
     )
     assert replay.status_code == 409
 
