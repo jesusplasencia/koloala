@@ -25,6 +25,7 @@ class PeopleRepositoryProtocol(Protocol):
     async def update_person(
         self, person_id: str, *, full_name: str | None = None, document_id: str | None = None
     ) -> Person | None: ...
+    async def change_phone(self, person_id: str, new_phone: str) -> Person | None: ...
     async def set_password(self, person_id: str, password_hash: str) -> None: ...
     async def reset_access(self, person_id: str) -> None: ...
     async def record_login_success(self, person_id: str, villa_id: str, client_ip: str) -> None: ...
@@ -189,6 +190,14 @@ class InMemoryPeopleRepository:
             p.full_name = full_name
         if document_id:
             p.document_id = document_id
+        p.updated_at = datetime.now(UTC)
+        return p
+
+    async def change_phone(self, person_id: str, new_phone: str) -> Person | None:
+        p = self._people.get(str(person_id))
+        if not p:
+            return None
+        p.phone = norm_phone(new_phone)
         p.updated_at = datetime.now(UTC)
         return p
 

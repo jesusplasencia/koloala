@@ -101,6 +101,15 @@ class PostgresPeopleRepository:
         await self.session.flush()
         return person_to_domain(row)
 
+    async def change_phone(self, person_id: str, new_phone: str) -> Person | None:
+        row = await self._row(person_id)
+        if not row:
+            return None
+        row.phone = norm_phone(new_phone)
+        row.updated_at = datetime.now(UTC)
+        await self.session.flush()
+        return person_to_domain(row)
+
     async def set_password(self, person_id: str, password_hash: str) -> None:
         row = await self._row(person_id)
         if row:

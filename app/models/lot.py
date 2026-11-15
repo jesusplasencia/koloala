@@ -224,6 +224,7 @@ class AddHouseholdMemberRequest(BaseModel):
 # --- Contratos HTTP (Request / Response) para el Administrador de cada Villa ---
 class UpdateMemberRequest(BaseModel):
     full_name: str | None = Field(default=None, min_length=2, max_length=100)
+    phone: str | None = Field(default=None, max_length=20, examples=["980180219"], description="Nuevo celular de la persona")
     document_id: str | None = Field(default=None, max_length=15, examples=["71234567"])
 
 

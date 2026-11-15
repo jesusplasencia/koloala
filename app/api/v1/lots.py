@@ -211,14 +211,17 @@ async def update_lot_member(
     lot_id: str,
     member_phone: str,
     payload: UpdateMemberRequest,
-    admin: AdminDep,
+    identity: CurrentIdentityDep,
     service: LotsServiceDep,
 ) -> LotMembership:
-    """[SOLO ADMIN] Corrige el nombre o el DNI/CE de un integrante (se le pide al activar su cuenta)."""
+    """
+    [ADMIN] nombre, celular y DNI de cualquier integrante.
+    [ANCHOR] nombre y celular de un HOUSEHOLD de su lote. Cambiar celular (o reemplazar DNI) restablece su acceso.
+    """
     return await service.update_lot_member(
-        villa_id=admin.villa_id,
+        villa_id=identity.villa_id,
         lot_id=lot_id,
         member_phone=member_phone,
         payload=payload,
-        identity=admin,
+        identity=identity,
     )

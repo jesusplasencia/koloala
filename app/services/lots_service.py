@@ -264,37 +264,74 @@ class LotsService:
         identity: AuthenticatedIdentity,
     ) -> LotMembership:
         """
-        [SOLO ADMIN] Corrige nombre o DNI de una persona (p. ej. lo pidió por WhatsApp).
-        El DNI vive en people: un cambio de DNI RESTABLECE su acceso (contraseña invalidada,
-        sesiones cerradas, límite diario de PIN reiniciado). Vuelve a entrar con celular + DNI nuevo.
+        Corrige nombre, celular o DNI de una persona.
+        - ADMIN: nombre, celular y DNI de cualquier integrante.
+        - ANCHOR: solo nombre y celular de un HOUSEHOLD de su propio lote (el DNI lo corrige el Admin).
+        Cambiar el celular o REEMPLAZAR un DNI existente restablece el acceso de la persona
+        (contraseña invalidada, sesiones cerradas): vuelve a activarse con su celular + DNI.
+        Completar un DNI vacío no restablece nada.
         """
-        if identity.role not in ADMIN_ROLES:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo el Administrador puede corregir datos.")
         norm, norm_lot = normalize_villa_id(villa_id), normalize_lot_id(lot_id)
+        is_admin = identity.role in ADMIN_ROLES
         current = await self.repo.get_membership(norm, norm_lot, member_phone)
         if not current or not current.person_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="El integrante no está activo en ese lote.")
+        if not is_admin:
+            await self._require_lot_member_or_admin(identity, norm, norm_lot, require_anchor=True)
+            if current.membership_role != MembershipRole.HOUSEHOLD:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo puedes editar a los familiares (HOUSEHOLD) de tu lote.")
+            if payload.document_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="El DNI solo lo corrige el Administrador (escríbele por WhatsApp).",
+                )
+            others = await self.repo.list_memberships_by_person(norm, current.person_id)
+            if any(m.lot_id != norm_lot for m in others):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Esta persona también pertenece a otro lote; pide el cambio al Administrador.",
+                )
+
         doc = _clean_doc(payload.document_id) if payload.document_id else None
-        # Solo se restablece el acceso al REEMPLAZAR un DNI existente; completar uno vacío no bloquea a nadie.
-        doc_changed = bool(doc) and bool(current.document_id) and doc != current.document_id
+        doc_replaced = bool(doc) and bool(current.document_id) and doc != current.document_id
+
+        new_phone = None
+        if payload.phone:
+            new_phone = _clean_phone(payload.phone)
+            if new_phone == current.phone:
+                new_phone = None
+            elif await self.people.get_by_phone(new_phone):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ese celular ya pertenece a otra persona registrada.")
+
         await self.people.update_person(
             current.person_id,
             full_name=payload.full_name.strip() if payload.full_name else None,
             document_id=doc,
         )
+        if new_phone:
+            await self.people.change_phone(current.person_id, new_phone)
+
         access_reset = False
-        if doc_changed:
+        if doc_replaced or new_phone:
             person = await self.people.get_by_id(current.person_id)
             if person and person.password_hash:
                 await self.people.reset_access(current.person_id)
                 access_reset = True
+
         log_audit_event(
-            event="LOT_MEMBER_DNI_CHANGED_ACCESS_RESET" if doc_changed else "LOT_MEMBER_UPDATED",
+            event="LOT_MEMBER_UPDATED",
             actor=f"{norm}:{identity.username}",
             client_ip="internal",
             user_agent="api",
-            details={"villa_id": norm, "lot_id": norm_lot, "member": current.phone, "document_changed": doc_changed, "access_reset": access_reset},
+            details={
+                "villa_id": norm,
+                "lot_id": norm_lot,
+                "member": current.phone,
+                "new_phone": new_phone,
+                "document_replaced": doc_replaced,
+                "access_reset": access_reset,
+            },
         )
-        updated = await self.repo.get_membership(norm, norm_lot, current.phone)
+        updated = await self.repo.get_membership(norm, norm_lot, new_phone or current.phone)
         assert updated is not None
         return _masked(updated)
