@@ -96,7 +96,7 @@ class VisitService:
             destination_lot_id=lot.lot_id,
             destination_type=lot.lot_type,
             destination_label=_label(lot),
-            host_phone=host[0],
+            host_person_id=host[0],
             host_name=host[1],
             host_role=host[2],
             party_size_expected=party_size,
@@ -227,8 +227,7 @@ class VisitService:
             lot_id = membership.lot_id if membership else identity.lot_id
         if not lot_id:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Indica el lote al que invitas.")
-        legacy_lot_login = identity.lot_id == lot_id and not identity.username.isdigit()
-        if not membership and not is_admin and not legacy_lot_login:
+        if not membership and not is_admin:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
                 f"No tienes membresía activa (ANCHOR ni HOUSEHOLD) sobre el lote '{lot_id}'.",
@@ -261,7 +260,7 @@ class VisitService:
             valid_until=valid_from + duration,
             party_size=max(payload.party_size_expected, len(payload.attendees)),
             host=(
-                membership.phone if membership else identity.username,
+                membership.person_id if membership else identity.person_id,
                 membership.full_name if membership else (identity.full_name or lot.owner_name),
                 str(membership.membership_role) if membership else str(identity.role),
             ),

@@ -11,6 +11,11 @@ class UserRole(StrEnum):
     RESIDENT = "RESIDENT"
 
 
+class StaffRoleName(StrEnum):
+    ADMIN = "ADMIN"
+    GUARD = "GUARD"
+
+
 class MembershipRole(StrEnum):
     ANCHOR = "ANCHOR"
     HOUSEHOLD = "HOUSEHOLD"
@@ -21,64 +26,44 @@ class AttackType(StrEnum):
     PASSWORD_SPRAYING = "PASSWORD_SPRAYING"
 
 
-# --- Entidad de Dominio: Usuario / Persona Identificada por Teléfono o Código ---
-class User(BaseModel):
-    villa_id: str = Field(
-        default="VC3",
-        examples=["VC1", "VC2", "VC3"],
-        description="Villa primaria o ámbito del usuario (VC1..VC5)",
-    )
-    username: str = Field(
-        ...,
-        examples=["916220518", "934253226", "980180219", "B14", "GUARDIA1", "ADMIN"],
-        description="Celular de 9 dígitos (identidad global en lasvillas.club) o usuario de sistema/lote",
-    )
-    password_hash: str = Field(..., exclude=True)
-    role: UserRole
-    lot_id: str | None = Field(
-        default=None,
-        examples=["P20", "B14"],
-        description="Lote principal activo o preseleccionado (None para GUARD o ADMIN)",
-    )
-    full_name: str | None = Field(
-        default=None,
-        examples=["Jesús Plasencia", "Angel Plasencia"],
-        description="Nombre completo de la persona",
-    )
-    document_id: str | None = Field(
-        default=None,
-        examples=["72345678", "001234567"],
-        description="DNI (8 dígitos) o Carnet de Extranjería (9-12 dígitos)",
-    )
-    email: str | None = None
+# --- Entidades de dominio ---
+class Person(BaseModel):
+    """Una fila por ser humano (global a todas las Villas). El celular es único pero NO es la PK."""
+
+    id: str = Field(..., description="UUID interno; nunca se usa el celular como llave")
+    phone: str = Field(..., examples=["916220518"])
+    full_name: str | None = None
+    document_id: str | None = Field(default=None, description="DNI (8) o CE (9-12)")
+    password_hash: str | None = Field(default=None, exclude=True)
+    is_super_admin: bool = False
     is_active: bool = True
-    last_login_at: datetime | None = None
-    last_login_ip: str | None = None
     token_version: int = 0
     access_reset_at: datetime | None = None
+    last_login_at: datetime | None = None
+    last_login_ip: str | None = None
     created_at: datetime
     updated_at: datetime
 
-    @property
-    def composite_key(self) -> tuple[str, str]:
-        return (self.villa_id, self.username)
+
+class StaffRole(BaseModel):
+    villa_id: str
+    person_id: str
+    role: StaffRoleName
+    is_active: bool = True
+    created_at: datetime
+    updated_at: datetime
 
 
 # --- Contratos HTTP de Autenticación y Seguridad ---
 class LoginRequest(BaseModel):
     username: str = Field(
         ...,
-        min_length=2,
-        max_length=30,
-        examples=["916220518", "934253226", "P20"],
-        description="Número telefónico de 9 dígitos (o usuario/código de lote)",
+        min_length=9,
+        max_length=20,
+        examples=["916220518"],
+        description="Celular de 9 dígitos (todos ingresan con su celular, incluido el personal)",
     )
-    password: str = Field(
-        ...,
-        min_length=4,
-        max_length=64,
-        examples=["48291057"],
-    )
+    password: str = Field(..., min_length=4, max_length=64, examples=["48291057"])
 
 
 class TokenResponse(BaseModel):
@@ -93,7 +78,7 @@ class TokenResponse(BaseModel):
     full_name: str | None = None
     available_lots: list[str] = Field(
         default_factory=list,
-        description="Lista de lotes donde este teléfono es ANCHOR o HOUSEHOLD activo en la Villa actual",
+        description="Lotes donde esta persona es ANCHOR o HOUSEHOLD activo en la Villa actual",
     )
 
 
@@ -116,20 +101,14 @@ class BlockedIPReport(BaseModel):
     attempted_usernames: list[str]
     suspected_lots_from_previous_logins: list[str] = Field(
         default_factory=list,
-        description="Lotes/usuarios de la Villa que iniciaron sesión con éxito antes desde esta misma IP",
+        description="Celulares de la Villa que iniciaron sesión con éxito antes desde esta misma IP",
     )
     blocked_at: datetime | None = None
     last_user_agent: str | None = None
 
 
 class UserLookupRequest(BaseModel):
-    username: str = Field(
-        ...,
-        min_length=2,
-        max_length=30,
-        examples=["916220518", "980180219", "P21", "ADMIN"],
-        description="Celular de 9 dígitos (ej. 916220518) o código de lote/usuario",
-    )
+    username: str = Field(..., min_length=2, max_length=30, examples=["916220518"])
 
 
 class UserLookupStatus(StrEnum):
@@ -166,6 +145,24 @@ class ActivateLotPinRequest(BaseModel):
 
 class ActivateLotPinResponse(BaseModel):
     villa_id: str
-    lot_id: str
+    lot_id: str | None
     delivery_channel: str
     message: str
+
+
+# --- Personal de garita y administración ---
+class CreateStaffRequest(BaseModel):
+    phone: str = Field(..., min_length=9, max_length=20, examples=["900000001"])
+    full_name: str = Field(..., min_length=2, max_length=100, examples=["Vigilante de Prueba"])
+    document_id: str | None = Field(default=None, max_length=15, examples=["40000003"])
+    role: StaffRoleName = StaffRoleName.GUARD
+
+
+class StaffMemberView(BaseModel):
+    villa_id: str
+    phone: str
+    full_name: str | None
+    role: StaffRoleName
+    document_id: str | None = Field(default=None, description="Enmascarado (******NN)")
+    is_active: bool
+    has_activated: bool

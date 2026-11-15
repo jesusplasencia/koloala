@@ -1,61 +1,82 @@
+"""Esquema relacional de Koloala.
+
+Identidad ordenada:
+- people           -> 1 fila por ser humano (UUID). El celular es único pero NO es la PK.
+- staff_roles      -> rol de personal (ADMIN / GUARD) de una persona en una Villa.
+- property_lots    -> el lote físico (sin datos del dueño).
+- lot_memberships  -> relación persona <-> lote (ANCHOR / HOUSEHOLD), sin nombre ni DNI.
+"""
+
+import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    ForeignKey,
     ForeignKeyConstraint,
     Integer,
     String,
     UniqueConstraint,
+    Uuid,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
     """Clase base declarativa de SQLAlchemy 2.0."""
 
 
+class PersonORM(Base):
+    __tablename__ = "people"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    phone: Mapped[str] = mapped_column(String(30), nullable=False, unique=True, index=True)
+    full_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    document_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_super_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    access_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_login_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+
+
+class StaffRoleORM(Base):
+    __tablename__ = "staff_roles"
+
+    villa_id: Mapped[str] = mapped_column(String(15), primary_key=True)
+    person_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("people.id"), primary_key=True)
+    role: Mapped[str] = mapped_column(String(10), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+
+
 class PropertyLotORM(Base):
-    """
-    Tabla 'property_lots' con Llave Primaria Compuesta (villa_id, lot_id).
-    Aísla los lotes físicos de VC1..VC5 dentro de la misma tabla física.
-    """
+    """Lote físico o ítem del catálogo (MiniLote / área común). El dueño se obtiene de lot_memberships."""
 
     __tablename__ = "property_lots"
 
     villa_id: Mapped[str] = mapped_column(String(15), primary_key=True)
     lot_id: Mapped[str] = mapped_column(String(15), primary_key=True)
-    owner_name: Mapped[str] = mapped_column(
-        String(100), nullable=False, default="Propietario"
-    )
-    owner_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    owner_email: Mapped[str | None] = mapped_column(String(150), nullable=True)
-    is_maintenance_up_to_date: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True
-    )
+    is_maintenance_up_to_date: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     lot_type: Mapped[str] = mapped_column(String(20), nullable=False, default="LOT")
     display_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_public: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
 
 
 class LotMembershipORM(Base):
-    """
-    Tabla relacional 3NF 'lot_memberships' con Llave Primaria Compuesta (villa_id, lot_id, phone)
-    y Foreign Key Compuesta hacia property_lots(villa_id, lot_id).
-    Desacopla la Persona (phone) del Lote físico (villa_id, lot_id):
-    - Permite que una persona sea ANCHOR en varios lotes (ej. P20 y Q02).
-    - Permite que una persona sea ANCHOR en Q03 y HOUSEHOLD en P20.
-    - Cuando un ANCHOR retira a un HOUSEHOLD, se hace soft-deactivate (is_active=False)
-      compatible con el rol de mínimo privilegio 'koloala_runtime' (sin DELETE).
-    """
-
     __tablename__ = "lot_memberships"
     __table_args__ = (
         ForeignKeyConstraint(
@@ -67,58 +88,16 @@ class LotMembershipORM(Base):
 
     villa_id: Mapped[str] = mapped_column(String(15), primary_key=True)
     lot_id: Mapped[str] = mapped_column(String(15), primary_key=True)
-    phone: Mapped[str] = mapped_column(String(30), primary_key=True, index=True)
-    full_name: Mapped[str] = mapped_column(String(100), nullable=False)
-    document_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    membership_role: Mapped[str] = mapped_column(
-        String(20), nullable=False, default="ANCHOR"
-    )
-    added_by: Mapped[str] = mapped_column(String(30), nullable=False, default="ADMIN")
+    person_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("people.id"), primary_key=True, index=True)
+    membership_role: Mapped[str] = mapped_column(String(20), nullable=False, default="ANCHOR")
+    added_by_person_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("people.id"), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
-    )
-
-
-class UserORM(Base):
-    """
-    Tabla 'users' con Llave Primaria Compuesta (villa_id, username).
-    Soporta SUPER_ADMIN ('916220518'), ADMIN ('934253226'), GUARD y RESIDENT.
-    """
-
-    __tablename__ = "users"
-
-    villa_id: Mapped[str] = mapped_column(String(15), primary_key=True)
-    username: Mapped[str] = mapped_column(String(30), primary_key=True, index=True)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[str] = mapped_column(String(20), nullable=False)
-    lot_id: Mapped[str | None] = mapped_column(String(15), nullable=True)
-    full_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    document_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    email: Mapped[str | None] = mapped_column(String(150), nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    last_login_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    last_login_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
-    token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    access_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
 
 
 class IPSecurityRecordORM(Base):
-    """
-    Tabla 'ip_security_records' con Llave Primaria Compuesta (villa_id, ip_address).
-    Persiste el radar Anti-Fuerza Bruta y Anti-Password Spraying en PostgreSQL.
-    """
+    """Radar anti fuerza bruta / password spraying por (villa, IP)."""
 
     __tablename__ = "ip_security_records"
     __table_args__ = (UniqueConstraint("villa_id", "ip_address", name="uq_villa_ip"),)
@@ -127,28 +106,17 @@ class IPSecurityRecordORM(Base):
     ip_address: Mapped[str] = mapped_column(String(45), primary_key=True)
     failed_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_blocked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    attempted_usernames: Mapped[list[str]] = mapped_column(
-        JSON, nullable=False, default=list
-    )
-    known_successful_users: Mapped[list[str]] = mapped_column(
-        JSON, nullable=False, default=list
-    )
-    blocked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    attempted_usernames: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    known_successful_users: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class VisitPassORM(Base):
-    """
-    Tabla 'visit_passes': QR grupal sin cuenta (invitación de residente, cartel público o mesa de garita).
-    El token es un secreto aleatorio (va dentro del QR); short_code (6) sirve para digitarlo a mano.
-    """
+    """QR grupal sin cuenta (invitación de residente o mesa de garita)."""
 
     __tablename__ = "visit_passes"
-    __table_args__ = (
-        UniqueConstraint("villa_id", "short_code", name="uq_visit_passes_short_code"),
-    )
+    __table_args__ = (UniqueConstraint("villa_id", "short_code", name="uq_visit_passes_short_code"),)
 
     villa_id: Mapped[str] = mapped_column(String(15), primary_key=True)
     token: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -158,7 +126,8 @@ class VisitPassORM(Base):
     destination_lot_id: Mapped[str] = mapped_column(String(15), nullable=False, index=True)
     destination_type: Mapped[str] = mapped_column(String(20), nullable=False)
     destination_label: Mapped[str] = mapped_column(String(100), nullable=False)
-    host_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    host_person_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("people.id"), nullable=True)
+    # Instantánea de quién invitó y con qué rol en ese momento (auditoría)
     host_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     host_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
     party_size_expected: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -169,18 +138,13 @@ class VisitPassORM(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     valid_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    checked_in_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
-    )
+    checked_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     checked_in_by_guard: Mapped[str | None] = mapped_column(String(30), nullable=True)
     shadowed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class PassAttendeeORM(Base):
-    """
-    Tabla 'pass_attendees': cada persona del grupo (NOMBRES, APELLIDOS, DNI opcional).
-    Tras 90 días el doc_number se borra por UPDATE y queda solo doc_hmac + doc_last2.
-    """
+    """Cada persona del grupo. Tras 90 días el doc_number se borra (UPDATE) y queda doc_hmac + doc_last2."""
 
     __tablename__ = "pass_attendees"
     __table_args__ = (
@@ -210,7 +174,7 @@ class PassAttendeeORM(Base):
 
 
 class DataAccessLogORM(Base):
-    """Tabla 'data_access_log' (solo INSERT): quién consultó DNIs/placas, cuándo y con qué filtro."""
+    """Solo INSERT: quién consultó DNIs/placas, cuándo y con qué filtro."""
 
     __tablename__ = "data_access_log"
 
@@ -222,20 +186,18 @@ class DataAccessLogORM(Base):
     filters: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     result_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     client_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
 
 
 class EntryEventORM(Base):
-    """Tabla 'entry_events' (solo INSERT): cada ingreso de un residente con su Carnet QR o manual."""
+    """Solo INSERT: cada ingreso de un residente con su Carnet QR o manual."""
 
     __tablename__ = "entry_events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     villa_id: Mapped[str] = mapped_column(String(15), nullable=False, index=True)
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    person_phone: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    person_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("people.id"), nullable=False, index=True)
     person_name: Mapped[str] = mapped_column(String(100), nullable=False)
     lots: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     method: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -245,13 +207,13 @@ class EntryEventORM(Base):
 
 
 class PinRequestORM(Base):
-    """Tabla 'pin_requests' (solo INSERT): cada solicitud de PIN por WhatsApp, para limitar envíos por número."""
+    """Solo INSERT: cada solicitud de PIN por WhatsApp, para limitar envíos por persona."""
 
     __tablename__ = "pin_requests"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     villa_id: Mapped[str] = mapped_column(String(15), nullable=False)
-    phone: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    person_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("people.id"), nullable=False, index=True)
     client_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
     ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)

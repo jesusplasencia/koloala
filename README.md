@@ -14,7 +14,7 @@ uv sync
 # 2. Aplicar migraciones SQL (3NF) en PostgreSQL / Supabase
 uv run alembic upgrade head
 
-# 3. Poblar datos iniciales (Super Admin 916220518, Admin VC3 934253226, Guardia y Lote P20)
+# 3. Poblar datos iniciales (Super Admin 916220518, Admin VC3 934253226, Guardia ficticio 900000001 y Lote P20)
 uv run python -m app.db.seed
 
 # 4. Levantar el servidor de desarrollo con recarga en caliente (Hot-Reload)
@@ -70,13 +70,15 @@ Una vez encendido el servidor local en `http://127.0.0.1:8000`:
 
 | Tabla Física | Llave Primaria Compuesta | Llaves Foráneas / Índices | Propósito 3NF |
 | :--- | :--- | :--- | :--- |
-| **`property_lots`** | `(villa_id, lot_id)` | PK Compuesta | Predio físico y mantenimiento; `lot_type` (`LOT` / `MINI_LOT` / `COMMON_AREA`), `display_name` e `is_public` para la vitrina. |
-| **`lot_memberships`** | `(villa_id, lot_id, phone)` | `FK -> property_lots(villa_id, lot_id)` + Index `phone` | Relación `N:M` normalizada entre Personas (`phone`) y Lotes (`villa_id, lot_id`) con su rol (`ANCHOR` o `HOUSEHOLD`) y baja lógica (`is_active`) compatible con `koloala_runtime`. |
-| **`users`** | `(villa_id, username)` | Index `username` | Credenciales (`password_hash` PBKDF2-SHA256), `role` (`SUPER_ADMIN`, `ADMIN`, `GUARD`, `RESIDENT`), `full_name` y `document_id` (DNI/CE). |
+| **`people`** | `id` (UUID) | `phone` UNIQUE | Una fila por persona (global a todas las villas): nombre, DNI/CE, contraseña PBKDF2, super admin, versión de sesión. |
+| **`staff_roles`** | `(villa_id, person_id)` | `FK -> people` | Personal de cada villa: `ADMIN` o `GUARD`. |
+| **`property_lots`** | `(villa_id, lot_id)` | PK Compuesta | Predio físico y mantenimiento; `lot_type` (`LOT` / `MINI_LOT` / `COMMON_AREA`), `display_name` e `is_public` para la vitrina. Sin datos del dueño. |
+| **`lot_memberships`** | `(villa_id, lot_id, person_id)` | `FK -> property_lots`, `FK -> people` | Persona ↔ lote con rol `ANCHOR` / `HOUSEHOLD` y baja lógica (`is_active`). |
 | **`visit_passes`** | `(villa_id, token)` | `uq (villa_id, short_code)` | QR grupal sin cuenta (`GUEST`/`TAXI`/`DELIVERY`), origen, destino, anfitrión, placa (+HMAC). |
 | **`pass_attendees`** | `(villa_id, token, attendee_no)` | `FK -> visit_passes` + Index `doc_hmac` | Cada persona del grupo: nombres, documento opcional, verificación y aval. |
-| **`entry_events`** | `id` | Index `person_phone`, `at` | Ingresos de residentes con Carnet QR (solo INSERT). |
+| **`entry_events`** | `id` | Index `person_id`, `at` | Ingresos de residentes con Carnet QR (solo INSERT). |
 | **`data_access_log`** | `id` | Index `villa_id` | Quién consultó DNIs/placas (solo INSERT). |
+| **`pin_requests`** | `id` | Index `person_id` | Envíos de PIN por WhatsApp para limitar spam (solo INSERT). |
 | **`ip_security_records`** | `(villa_id, ip_address)` | `uq_villa_ip` | Radar Anti-Fuerza Bruta y Anti-Password Spraying (bloqueo al 3er fallo y correlación de lote sospechoso). |
 
 ---

@@ -3,7 +3,7 @@
 ### 1. Health Check
 GET {{baseUrl}}/healthz/liveness
 
-### 2. [AUTH VC3] Vecino al día (VC3 + B14) inicia sesión en vc3.lasvillas.club
+### 2. [AUTH VC3] Residente (todos entran con su celular) inicia sesión en vc3.lasvillas.club
 # @name loginResidentB14
 POST {{baseUrl}}/api/v1/auth/login
 Host: vc3.lasvillas.club
@@ -11,8 +11,8 @@ Content-Type: application/json
 X-Forwarded-For: 190.236.10.14
 
 {
-  "username": "B14",
-  "password": "VC3-B14"
+  "username": "916220518",
+  "password": "PIN_DEL_SEED"
 }
 
 ### 3. [AUTH VC3] Vigilante de Garita VC3 inicia sesión
@@ -23,8 +23,8 @@ Content-Type: application/json
 X-Forwarded-For: 181.65.20.10
 
 {
-  "username": "guardia1",
-  "password": "guardia123"
+  "username": "900000001",
+  "password": "PIN_DEL_SEED"
 }
 
 ### 4. [AUTH VC3] Administrador de la Junta Directiva VC3 inicia sesión
@@ -35,8 +35,8 @@ Content-Type: application/json
 X-Forwarded-For: 181.65.20.99
 
 {
-  "username": "admin",
-  "password": "admin123"
+  "username": "934253226",
+  "password": "PIN_DEL_SEED"
 }
 
 ### 5. [VECINO VC3+B14] Crea un QR de Taxi (30 min, placa obligatoria en garita)

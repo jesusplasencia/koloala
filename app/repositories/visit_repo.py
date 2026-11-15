@@ -6,12 +6,12 @@ from app.models.lot import (
     LotType,
     PropertyLot,
     normalize_lot_id,
-    normalize_phone_username,
     normalize_villa_id,
 )
+from app.models.user import Person
 from app.models.entry import EntryEvent
 from app.models.visit import CatalogBulkItem, VisitPass
-from app.repositories.lots_repo import in_memory_lot_repo
+from app.repositories.lots_repo import InMemoryLotRepository, in_memory_lot_repo
 
 
 class VisitRepositoryProtocol(Protocol):
@@ -26,6 +26,9 @@ class VisitRepositoryProtocol(Protocol):
     async def list_memberships_by_phone(
         self, villa_id: str, phone: str
     ) -> list[LotMembership]: ...
+    async def list_memberships_by_person(self, villa_id: str, person_id: str) -> list[LotMembership]: ...
+    async def get_person_by_id(self, person_id: str) -> Person | None: ...
+    async def get_person_by_phone(self, phone: str) -> Person | None: ...
     async def save_visit(self, visit: VisitPass) -> VisitPass: ...
     async def get_visit(self, villa_id: str, token: str) -> VisitPass | None: ...
     async def get_visit_by_code(self, villa_id: str, short_code: str) -> VisitPass | None: ...
@@ -48,7 +51,7 @@ class VisitRepositoryProtocol(Protocol):
         self,
         villa_id: str,
         *,
-        person_phone: str | None = None,
+        person_id: str | None = None,
         lot_id: str | None = None,
         plate_hmac: str | None = None,
         date_from: datetime | None = None,
@@ -83,23 +86,32 @@ def _matches(
 
 
 class InMemoryVisitRepository:
-    def __init__(
-        self,
-        lots_store: dict[tuple[str, str], PropertyLot] | None = None,
-        memberships_store: dict[tuple[str, str, str], LotMembership] | None = None,
-    ) -> None:
-        self._lots = lots_store if lots_store is not None else in_memory_lot_repo.lots_store
-        self._memberships = (
-            memberships_store
-            if memberships_store is not None
-            else in_memory_lot_repo.memberships_store
-        )
+    """Visitas en memoria. Lotes, membresías y personas se delegan al repositorio de lotes."""
+
+    def __init__(self, lot_repo: InMemoryLotRepository | None = None) -> None:
+        self.lot_repo = lot_repo if lot_repo is not None else in_memory_lot_repo
+        self._lots = self.lot_repo.lots_store
         self._visits: dict[tuple[str, str], VisitPass] = {}
         self.data_access_log: list[dict[str, Any]] = []
         self.entry_events: list[EntryEvent] = []
 
     async def get_lot(self, villa_id: str, lot_id: str) -> PropertyLot | None:
-        return self._lots.get((normalize_villa_id(villa_id), normalize_lot_id(lot_id)))
+        return await self.lot_repo.get_lot(villa_id, lot_id)
+
+    async def get_membership(self, villa_id: str, lot_id: str, phone: str) -> LotMembership | None:
+        return await self.lot_repo.get_membership(villa_id, lot_id, phone)
+
+    async def list_memberships_by_phone(self, villa_id: str, phone: str) -> list[LotMembership]:
+        return await self.lot_repo.list_memberships_by_phone(villa_id, phone)
+
+    async def list_memberships_by_person(self, villa_id: str, person_id: str) -> list[LotMembership]:
+        return await self.lot_repo.list_memberships_by_person(villa_id, person_id)
+
+    async def get_person_by_id(self, person_id: str) -> Person | None:
+        return await self.lot_repo.people.get_by_id(person_id)
+
+    async def get_person_by_phone(self, phone: str) -> Person | None:
+        return await self.lot_repo.people.get_by_phone(phone)
 
     async def list_catalog(self, villa_id: str) -> list[PropertyLot]:
         norm = normalize_villa_id(villa_id)
@@ -131,7 +143,6 @@ class InMemoryVisitRepository:
         lot = PropertyLot(
             villa_id=norm,
             lot_id=key[1],
-            owner_name=item.display_name,
             is_maintenance_up_to_date=True,
             lot_type=item.lot_type,
             display_name=item.display_name,
@@ -141,28 +152,6 @@ class InMemoryVisitRepository:
         )
         self._lots[key] = lot
         return lot, True
-
-    async def get_membership(
-        self, villa_id: str, lot_id: str, phone: str
-    ) -> LotMembership | None:
-        key = (
-            normalize_villa_id(villa_id),
-            normalize_lot_id(lot_id),
-            normalize_phone_username(phone) or phone.strip(),
-        )
-        mem = self._memberships.get(key)
-        return mem if mem and mem.is_active else None
-
-    async def list_memberships_by_phone(
-        self, villa_id: str, phone: str
-    ) -> list[LotMembership]:
-        norm_villa = normalize_villa_id(villa_id)
-        norm_phone = normalize_phone_username(phone) or phone.strip()
-        return [
-            m
-            for m in self._memberships.values()
-            if m.villa_id == norm_villa and m.phone == norm_phone and m.is_active
-        ]
 
     async def save_visit(self, visit: VisitPass) -> VisitPass:
         self._visits[(visit.villa_id, visit.token)] = visit.model_copy(deep=True)
@@ -235,7 +224,7 @@ class InMemoryVisitRepository:
         self,
         villa_id: str,
         *,
-        person_phone: str | None = None,
+        person_id: str | None = None,
         lot_id: str | None = None,
         plate_hmac: str | None = None,
         date_from: datetime | None = None,
@@ -247,7 +236,7 @@ class InMemoryVisitRepository:
             e
             for e in self.entry_events
             if e.villa_id == norm
-            and (not person_phone or e.person_phone == person_phone)
+            and (not person_id or e.person_id == str(person_id))
             and (not lot_id or any(lot.lot_id == lot_id for lot in e.lots))
             and (not plate_hmac or e.plate_hmac == plate_hmac)
             and (not date_from or e.at >= date_from)

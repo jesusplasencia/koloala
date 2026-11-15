@@ -1,3 +1,4 @@
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -11,7 +12,7 @@ from app.db.models import (
     PropertyLotORM,
     VisitPassORM,
 )
-from app.db.repositories import PostgresMembershipLookup
+from app.db.repositories import PostgresLotRepository, lot_to_domain
 from app.models.entry import EntryEvent, EntryLot, EntryMethod
 from app.models.lot import LotType, PropertyLot, normalize_lot_id, normalize_villa_id
 from app.models.visit import (
@@ -33,7 +34,6 @@ _PASS_FIELDS = (
     "destination_lot_id",
     "destination_type",
     "destination_label",
-    "host_phone",
     "host_name",
     "host_role",
     "party_size_expected",
@@ -69,12 +69,31 @@ def _plain(value: Any) -> Any:
     return str(value) if hasattr(value, "value") else value
 
 
-class PostgresVisitRepository(PostgresMembershipLookup):
-    """Reutiliza get_lot / get_membership / list_memberships_by_phone de PostgresMembershipLookup.
+class PostgresVisitRepository:
+    """Visitas, ingresos y bitácora. Lotes/membresías/personas se delegan a PostgresLotRepository.
     Nunca emite DELETE (rol koloala_runtime solo tiene SELECT, INSERT, UPDATE)."""
 
     def __init__(self, session: AsyncSession) -> None:
-        super().__init__(session)
+        self.session = session
+        self.lots = PostgresLotRepository(session)
+
+    async def get_lot(self, villa_id: str, lot_id: str) -> PropertyLot | None:
+        return await self.lots.get_lot(villa_id, lot_id)
+
+    async def get_membership(self, villa_id: str, lot_id: str, phone: str):
+        return await self.lots.get_membership(villa_id, lot_id, phone)
+
+    async def list_memberships_by_phone(self, villa_id: str, phone: str):
+        return await self.lots.list_memberships_by_phone(villa_id, phone)
+
+    async def list_memberships_by_person(self, villa_id: str, person_id: str):
+        return await self.lots.list_memberships_by_person(villa_id, person_id)
+
+    async def get_person_by_id(self, person_id: str):
+        return await self.lots.people.get_by_id(person_id)
+
+    async def get_person_by_phone(self, phone: str):
+        return await self.lots.people.get_by_phone(phone)
 
     async def list_catalog(self, villa_id: str) -> list[PropertyLot]:
         stmt = (
@@ -87,7 +106,7 @@ class PostgresVisitRepository(PostgresMembershipLookup):
             .order_by(PropertyLotORM.lot_type, PropertyLotORM.lot_id)
         )
         rows = (await self.session.execute(stmt)).scalars().all()
-        return [self._lot_to_domain(r) for r in rows]
+        return [lot_to_domain(r) for r in rows]
 
     async def upsert_catalog_item(
         self, villa_id: str, item: CatalogBulkItem
@@ -100,7 +119,6 @@ class PostgresVisitRepository(PostgresMembershipLookup):
             row = PropertyLotORM(
                 villa_id=key[0],
                 lot_id=key[1],
-                owner_name=item.display_name,
                 is_maintenance_up_to_date=True,
                 created_at=now,
             )
@@ -110,7 +128,7 @@ class PostgresVisitRepository(PostgresMembershipLookup):
         row.is_public = item.is_public
         row.updated_at = now
         await self.session.flush()
-        return self._lot_to_domain(row), created
+        return lot_to_domain(row), created
 
     def _visit_to_domain(self, row: VisitPassORM, attendees: list[PassAttendeeORM]) -> VisitPass:
         return VisitPass(
@@ -122,7 +140,7 @@ class PostgresVisitRepository(PostgresMembershipLookup):
             destination_lot_id=row.destination_lot_id,
             destination_type=LotType(row.destination_type),
             destination_label=row.destination_label,
-            host_phone=row.host_phone,
+            host_person_id=str(row.host_person_id) if row.host_person_id else None,
             host_name=row.host_name,
             host_role=row.host_role,
             party_size_expected=row.party_size_expected,
@@ -176,6 +194,7 @@ class PostgresVisitRepository(PostgresMembershipLookup):
             self.session.add(row)
         for f in _PASS_FIELDS:
             setattr(row, f, _plain(getattr(visit, f)))
+        row.host_person_id = uuid.UUID(visit.host_person_id) if visit.host_person_id else None
         await self.session.flush()
         for a in visit.attendees:
             arow = await self.session.get(PassAttendeeORM, (key[0], key[1], a.attendee_no))
@@ -270,7 +289,7 @@ class PostgresVisitRepository(PostgresMembershipLookup):
             EntryEventORM(
                 villa_id=event.villa_id,
                 at=event.at,
-                person_phone=event.person_phone,
+                person_id=uuid.UUID(str(event.person_id)),
                 person_name=event.person_name,
                 lots=[lot.model_dump() for lot in event.lots],
                 method=str(event.method),
@@ -286,7 +305,7 @@ class PostgresVisitRepository(PostgresMembershipLookup):
         self,
         villa_id: str,
         *,
-        person_phone: str | None = None,
+        person_id: str | None = None,
         lot_id: str | None = None,
         plate_hmac: str | None = None,
         date_from: datetime | None = None,
@@ -294,8 +313,8 @@ class PostgresVisitRepository(PostgresMembershipLookup):
         limit: int = 200,
     ) -> list[EntryEvent]:
         stmt = select(EntryEventORM).where(EntryEventORM.villa_id == normalize_villa_id(villa_id))
-        if person_phone:
-            stmt = stmt.where(EntryEventORM.person_phone == person_phone)
+        if person_id:
+            stmt = stmt.where(EntryEventORM.person_id == uuid.UUID(str(person_id)))
         if plate_hmac:
             stmt = stmt.where(EntryEventORM.plate_hmac == plate_hmac)
         if date_from:
@@ -309,7 +328,7 @@ class PostgresVisitRepository(PostgresMembershipLookup):
             EntryEvent(
                 villa_id=r.villa_id,
                 at=r.at,
-                person_phone=r.person_phone,
+                person_id=str(r.person_id),
                 person_name=r.person_name,
                 lots=[EntryLot(**lot) for lot in (r.lots or [])],
                 method=EntryMethod(r.method),

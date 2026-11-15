@@ -1,4 +1,5 @@
-import secrets
+"""Padrón de lotes y membresías persona<->lote (ANCHOR / HOUSEHOLD). Nombre y DNI viven en people."""
+
 import math
 
 from fastapi import HTTPException, status
@@ -6,29 +7,24 @@ from fastapi import HTTPException, status
 from app.core.audit import log_audit_event
 from app.core.config import settings
 from app.core.pii import mask_doc, normalize_document_id
-from app.core.security import (
-    AuthenticatedIdentity,
-    generate_initial_lot_password,
-    hash_password,
-)
+from app.core.security import AuthenticatedIdentity
 from app.models.lot import (
     AddHouseholdMemberRequest,
     BulkUpsertLotsRequest,
     BulkUpsertLotsResponse,
-    GeneratedLotCredential,
     LotMembership,
     PaginatedLotsResponse,
     PropertyLot,
     UpdateLotMaintenanceRequest,
     UpdateMemberRequest,
-    build_whatsapp_onboarding_url,
     normalize_lot_id,
     normalize_phone_username,
     normalize_villa_id,
 )
 from app.models.user import MembershipRole, UserRole
 from app.repositories.lots_repo import LotRepositoryProtocol
-from app.repositories.users_repo import UserRepositoryProtocol, in_memory_user_repo
+
+ADMIN_ROLES = (UserRole.ADMIN, UserRole.SUPER_ADMIN)
 
 
 def _masked(mem: LotMembership) -> LotMembership:
@@ -36,50 +32,50 @@ def _masked(mem: LotMembership) -> LotMembership:
     return mem.model_copy(update={"document_id": mask_doc(None, mem.document_id[-2:]) if mem.document_id else None})
 
 
-class LotsService:
-    def __init__(
-        self,
-        repo: LotRepositoryProtocol,
-        user_repo: UserRepositoryProtocol = in_memory_user_repo,
-    ) -> None:
-        self.repo = repo
-        self.user_repo = user_repo
+def _clean_doc(raw: str | None) -> str | None:
+    try:
+        return normalize_document_id(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
-    async def list_lots(
-        self,
-        villa_id: str,
-        page: int = 0,
-        limit: int = 50,
-        is_maintenance_up_to_date: bool | None = None,
-    ) -> PaginatedLotsResponse:
-        norm_villa = normalize_villa_id(villa_id)
-        items, total = await self.repo.list_lots(
-            villa_id=norm_villa,
-            page=page,
-            limit=limit,
-            is_maintenance_up_to_date=is_maintenance_up_to_date,
+
+def _clean_phone(raw: str) -> str:
+    phone = normalize_phone_username(raw) or ""
+    if not (phone.isdigit() and len(phone) == 9):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El número de teléfono debe tener 9 dígitos válidos (ej. 980180219).",
         )
+    return phone
+
+
+class LotsService:
+    def __init__(self, repo: LotRepositoryProtocol) -> None:
+        self.repo = repo
+        self.people = repo.people
+
+    # ---------------- lotes ----------------
+    async def list_lots(
+        self, villa_id: str, page: int = 0, limit: int = 50, is_maintenance_up_to_date: bool | None = None
+    ) -> PaginatedLotsResponse:
+        norm = normalize_villa_id(villa_id)
+        items, total = await self.repo.list_lots(norm, page, limit, is_maintenance_up_to_date)
         total_pages = math.ceil(total / limit) if total > 0 else 0
-        has_next = (page + 1) < total_pages
         return PaginatedLotsResponse(
-            villa_id=norm_villa,
+            villa_id=norm,
             items=items,
             total=total,
             page=page,
             limit=limit,
             total_pages=total_pages,
-            has_next=has_next,
+            has_next=(page + 1) < total_pages,
         )
 
     async def get_lot(self, villa_id: str, lot_id: str) -> PropertyLot:
-        norm_villa = normalize_villa_id(villa_id)
-        norm_id = normalize_lot_id(lot_id)
-        lot = await self.repo.get_lot(norm_villa, norm_id)
+        norm, norm_id = normalize_villa_id(villa_id), normalize_lot_id(lot_id)
+        lot = await self.repo.get_lot(norm, norm_id)
         if not lot:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"El lote '{norm_id}' no existe en el padrón de {norm_villa}.",
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"El lote '{norm_id}' no existe en el padrón de {norm}.")
         return lot
 
     async def update_lot_maintenance(
@@ -91,37 +87,24 @@ class LotsService:
         client_ip: str = "internal",
         user_agent: str = "unknown",
     ) -> PropertyLot:
-        norm_villa = normalize_villa_id(villa_id)
-        norm_id = normalize_lot_id(lot_id)
-        updated_lot = await self.repo.update_lot_status(
-            villa_id=norm_villa,
-            lot_id=norm_id,
-            is_maintenance_up_to_date=payload.is_maintenance_up_to_date,
-            owner_name=payload.owner_name,
-            owner_phone=payload.owner_phone,
-            owner_email=payload.owner_email,
-        )
-        if not updated_lot:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"El lote '{norm_id}' no existe en el padrón de {norm_villa}.",
-            )
-
+        norm, norm_id = normalize_villa_id(villa_id), normalize_lot_id(lot_id)
+        updated = await self.repo.update_lot_status(norm, norm_id, payload.is_maintenance_up_to_date)
+        if not updated:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"El lote '{norm_id}' no existe en el padrón de {norm}.")
+        if payload.owner_name and updated.owner_phone:
+            # El nombre del titular vive en people: se corrige en un solo lugar
+            owner = await self.people.get_by_phone(updated.owner_phone)
+            if owner:
+                await self.people.update_person(owner.id, full_name=payload.owner_name.strip())
+                updated = await self.get_lot(norm, norm_id)
         log_audit_event(
             event="LOT_MAINTENANCE_UPDATED",
-            actor=f"{norm_villa}:{actor}",
+            actor=f"{norm}:{actor}",
             client_ip=client_ip,
             user_agent=user_agent,
-            details={
-                "villa_id": norm_villa,
-                "lot_id": updated_lot.lot_id,
-                "is_maintenance_up_to_date": updated_lot.is_maintenance_up_to_date,
-                "owner_name": updated_lot.owner_name,
-                "owner_phone": updated_lot.owner_phone,
-                "owner_email": updated_lot.owner_email,
-            },
+            details={"villa_id": norm, "lot_id": updated.lot_id, "is_maintenance_up_to_date": updated.is_maintenance_up_to_date},
         )
-        return updated_lot
+        return updated
 
     async def bulk_upsert_lots(
         self,
@@ -131,235 +114,53 @@ class LotsService:
         client_ip: str = "internal",
         user_agent: str = "unknown",
     ) -> BulkUpsertLotsResponse:
-        norm_villa = normalize_villa_id(villa_id)
-        created_count, updated_count, processed_lots, newly_created_lots = (
-            await self.repo.upsert_bulk_lots(norm_villa, payload.lots)
-        )
-
-        generated_credentials: list[GeneratedLotCredential] = []
-        login_url = f"https://{norm_villa.lower()}.lasvillas.club"
-
-        for new_lot in newly_created_lots:
-            initial_password = generate_initial_lot_password()
-            _, created_user = await self.user_repo.create_or_get_resident_user(
-                villa_id=norm_villa,
-                lot_id=new_lot.lot_id,
-                initial_password=initial_password,
-                email=new_lot.owner_email,
-                full_name=new_lot.owner_name,
-            )
-            # Además, si tiene celular (Persona-Ancla), pre-registramos su membresía 3NF
-            # (la activación de su PIN por WhatsApp ocurrirá en su 1er ingreso si aún no tiene clave)
-            if created_user:
-                whatsapp_url = build_whatsapp_onboarding_url(
-                    phone=new_lot.owner_phone,
-                    villa_id=norm_villa,
-                    lot_id=new_lot.lot_id,
-                    password=initial_password,
-                    login_url=login_url,
-                )
-                generated_credentials.append(
-                    GeneratedLotCredential(
-                        villa_id=norm_villa,
-                        lot_id=new_lot.lot_id,
-                        username=new_lot.lot_id,
-                        owner_name=new_lot.owner_name,
-                        owner_phone=new_lot.owner_phone,
-                        owner_email=new_lot.owner_email,
-                        initial_password=initial_password,
-                        login_url=login_url,
-                        whatsapp_share_url=whatsapp_url,
-                    )
-                )
-
+        """Crea/actualiza lotes y, si traen celular, la PERSONA titular (nombre, DNI) y su membresía ANCHOR."""
+        norm = normalize_villa_id(villa_id)
+        for item in payload.lots:
+            if item.owner_phone:
+                _clean_phone(item.owner_phone)
+        created, updated, processed = await self.repo.upsert_bulk_lots(norm, payload.lots)
         log_audit_event(
             event="LOTS_BULK_SYNC",
-            actor=f"{norm_villa}:{actor}",
+            actor=f"{norm}:{actor}",
             client_ip=client_ip,
             user_agent=user_agent,
-            details={
-                "villa_id": norm_villa,
-                "processed_count": len(processed_lots),
-                "created_count": created_count,
-                "updated_count": updated_count,
-                "new_lot_ids": [lot.lot_id for lot in newly_created_lots],
-            },
+            details={"villa_id": norm, "processed_count": len(processed), "created_count": created, "updated_count": updated},
         )
-
         return BulkUpsertLotsResponse(
-            villa_id=norm_villa,
-            processed_count=len(processed_lots),
-            created_count=created_count,
-            updated_count=updated_count,
-            lots=processed_lots,
-            generated_credentials=generated_credentials,
+            villa_id=norm, processed_count=len(processed), created_count=created, updated_count=updated, lots=processed
         )
 
-    async def reset_lot_password(
-        self,
-        villa_id: str,
-        lot_id: str,
-        actor: str = "ADMIN",
-        client_ip: str = "internal",
-        user_agent: str = "unknown",
-    ) -> GeneratedLotCredential:
-        """
-        Permite al Administrador generar una nueva contraseña numérica de 8 dígitos
-        para un vecino que olvidó su clave o cambió de teléfono.
-        """
-        norm_villa = normalize_villa_id(villa_id)
-        norm_id = normalize_lot_id(lot_id)
-        lot = await self.repo.get_lot(norm_villa, norm_id)
-        if not lot:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"El lote '{norm_id}' no existe en el padrón de {norm_villa}.",
-            )
-
-        new_password = generate_initial_lot_password()
-        new_hash = hash_password(new_password)
-        existing_user = await self.user_repo.get_user(norm_villa, norm_id)
-        if existing_user:
-            await self.user_repo.update_password(
-                norm_villa,
-                norm_id,
-                new_hash,
-                clear_last_login=True,
-            )
-        else:
-            await self.user_repo.create_or_get_resident_user(
-                villa_id=norm_villa,
-                lot_id=norm_id,
-                initial_password=new_password,
-                email=lot.owner_email,
-                full_name=lot.owner_name,
-            )
-
-        # Si el lote tiene owner_phone (Persona-Ancla), también reseteamos su cuenta telefónica si existe
-        norm_phone = normalize_phone_username(lot.owner_phone)
-        if norm_phone:
-            phone_user = await self.user_repo.get_user(norm_villa, norm_phone)
-            if phone_user:
-                await self.user_repo.update_password(
-                    norm_villa,
-                    norm_phone,
-                    new_hash,
-                    clear_last_login=True,
-                )
-
-        login_url = f"https://{norm_villa.lower()}.lasvillas.club"
-        whatsapp_url = build_whatsapp_onboarding_url(
-            phone=lot.owner_phone,
-            villa_id=norm_villa,
-            lot_id=lot.lot_id,
-            password=new_password,
-            login_url=login_url,
-        )
-
-        log_audit_event(
-            event="LOT_PASSWORD_RESET_BY_ADMIN",
-            actor=f"{norm_villa}:{actor}",
-            client_ip=client_ip,
-            user_agent=user_agent,
-            details={"villa_id": norm_villa, "lot_id": lot.lot_id},
-        )
-
-        return GeneratedLotCredential(
-            villa_id=norm_villa,
-            lot_id=lot.lot_id,
-            username=norm_phone or lot.lot_id,
-            owner_name=lot.owner_name,
-            owner_phone=lot.owner_phone,
-            owner_email=lot.owner_email,
-            initial_password=new_password,
-            login_url=login_url,
-            whatsapp_share_url=whatsapp_url,
-        )
-
-    # -------------------------------------------------------------------------
-    # GESTIÓN 3NF DE MEMBRESÍAS (ANCHOR & HOUSEHOLD)
-    # -------------------------------------------------------------------------
-    async def list_my_memberships(
-        self, identity: AuthenticatedIdentity
-    ) -> list[LotMembership]:
-        """
-        Devuelve todos los lotes donde la persona autenticada es ANCHOR o HOUSEHOLD
-        dentro de la Villa actual (ej. Pepito Juárez en P20 y Q02; Pepita Reina en Q03 y P20).
-        """
-        memberships = await self.repo.list_memberships_by_phone(
-            identity.villa_id, identity.username
-        )
-        if memberships:
-            return [_masked(m) for m in memberships]
-
-        # Compatibilidad si ingresó con código de lote directo (ej. B14)
-        if identity.lot_id:
-            lot = await self.repo.get_lot(identity.villa_id, identity.lot_id)
-            if lot:
-                return [
-                    LotMembership(
-                        villa_id=lot.villa_id,
-                        lot_id=lot.lot_id,
-                        phone=lot.owner_phone or identity.username,
-                        full_name=lot.owner_name,
-                        membership_role=MembershipRole.ANCHOR,
-                        added_by="ADMIN",
-                        is_active=True,
-                        is_maintenance_up_to_date=lot.is_maintenance_up_to_date,
-                        created_at=lot.created_at,
-                        updated_at=lot.updated_at,
-                    )
-                ]
-        return []
+    # ---------------- membresías ----------------
+    async def list_my_memberships(self, identity: AuthenticatedIdentity) -> list[LotMembership]:
+        return [_masked(m) for m in await self.repo.list_memberships_by_person(identity.villa_id, identity.person_id or "")]
 
     async def _require_lot_member_or_admin(
-        self,
-        identity: AuthenticatedIdentity,
-        villa_id: str,
-        lot_id: str,
-        require_anchor: bool = False,
+        self, identity: AuthenticatedIdentity, villa_id: str, lot_id: str, require_anchor: bool = False
     ) -> LotMembership | None:
-        norm_villa = normalize_villa_id(villa_id)
-        norm_lot = normalize_lot_id(lot_id)
-
-        if identity.role in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
+        if identity.role in ADMIN_ROLES:
             return None
-
-        mem = await self.repo.get_membership(norm_villa, norm_lot, identity.username)
-        if not mem and identity.lot_id == norm_lot and identity.username == norm_lot:
-            # Cuenta legacy por lote directo -> tratada como ANCHOR de su lote
-            return None
-
+        mem = await self.repo.get_membership(villa_id, lot_id, identity.username)
         if not mem:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"No tienes permisos ni membresía activa sobre el lote {norm_lot} en {norm_villa}.",
+                detail=f"No tienes permisos ni membresía activa sobre el lote {lot_id} en {villa_id}.",
             )
-
         if require_anchor and mem.membership_role != MembershipRole.ANCHOR:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
-                    f"Acción restringida: tu rol en el lote {norm_lot} es HOUSEHOLD (Conviviente). "
-                    "Como HOUSEHOLD solo puedes generar códigos QR de acceso; "
-                    "únicamente la Persona-Ancla (ANCHOR) o el Administrador pueden agregar o retirar integrantes del lote."
+                    f"Acción restringida: tu rol en el lote {lot_id} es HOUSEHOLD (Conviviente). "
+                    "Solo la Persona-Ancla (ANCHOR) o el Administrador pueden agregar o retirar integrantes."
                 ),
             )
         return mem
 
-    async def list_lot_members(
-        self,
-        villa_id: str,
-        lot_id: str,
-        identity: AuthenticatedIdentity,
-    ) -> list[LotMembership]:
-        norm_villa = normalize_villa_id(villa_id)
-        norm_lot = normalize_lot_id(lot_id)
-        await self.get_lot(norm_villa, norm_lot)
-        await self._require_lot_member_or_admin(
-            identity, norm_villa, norm_lot, require_anchor=False
-        )
-        return [_masked(m) for m in await self.repo.list_lot_members(norm_villa, norm_lot)]
+    async def list_lot_members(self, villa_id: str, lot_id: str, identity: AuthenticatedIdentity) -> list[LotMembership]:
+        norm, norm_lot = normalize_villa_id(villa_id), normalize_lot_id(lot_id)
+        await self.get_lot(norm, norm_lot)
+        await self._require_lot_member_or_admin(identity, norm, norm_lot)
+        return [_masked(m) for m in await self.repo.list_lot_members(norm, norm_lot)]
 
     async def add_lot_member(
         self,
@@ -370,43 +171,23 @@ class LotsService:
         client_ip: str = "internal",
         user_agent: str = "unknown",
     ) -> LotMembership:
-        norm_villa = normalize_villa_id(villa_id)
-        norm_lot = normalize_lot_id(lot_id)
-        await self.get_lot(norm_villa, norm_lot)
-        await self._require_lot_member_or_admin(
-            identity, norm_villa, norm_lot, require_anchor=True
-        )
+        norm, norm_lot = normalize_villa_id(villa_id), normalize_lot_id(lot_id)
+        await self.get_lot(norm, norm_lot)
+        await self._require_lot_member_or_admin(identity, norm, norm_lot, require_anchor=True)
+        phone = _clean_phone(payload.phone)
+        is_admin = identity.role in ADMIN_ROLES
 
-        norm_phone = normalize_phone_username(payload.phone)
-        if not norm_phone or not norm_phone.isdigit() or len(norm_phone) != 9:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="El número de teléfono debe tener 9 dígitos válidos (ej. 980180219).",
-            )
-
-        # Solo ADMIN o SUPER_ADMIN puede designar a otro ANCHOR; un ANCHOR siempre agrega HOUSEHOLD
-        target_role = payload.membership_role
-        if identity.role not in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
-            target_role = MembershipRole.HOUSEHOLD
-            # Un ANCHOR no puede degradar (vía upsert) a otra Persona-Ancla del mismo lote
-            existing_mem = await self.repo.get_membership(norm_villa, norm_lot, norm_phone)
-            if existing_mem and existing_mem.membership_role == MembershipRole.ANCHOR:
+        target_role = payload.membership_role if is_admin else MembershipRole.HOUSEHOLD
+        if not is_admin:
+            existing = await self.repo.get_membership(norm, norm_lot, phone)
+            if existing and existing.membership_role == MembershipRole.ANCHOR:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Esta persona ya es Persona-Ancla (ANCHOR) del lote; solo el Administrador puede cambiar su rol.",
                 )
-
-        if target_role == MembershipRole.HOUSEHOLD and identity.role not in (
-            UserRole.ADMIN,
-            UserRole.SUPER_ADMIN,
-        ):
-            current = await self.repo.get_membership(norm_villa, norm_lot, norm_phone)
-            if not current or not current.is_active:
-                members = await self.repo.list_lot_members(norm_villa, norm_lot)
+            if not existing:
                 active_household = sum(
-                    1
-                    for m in members
-                    if m.is_active and m.membership_role == MembershipRole.HOUSEHOLD
+                    1 for m in await self.repo.list_lot_members(norm, norm_lot) if m.membership_role == MembershipRole.HOUSEHOLD
                 )
                 if active_household >= settings.max_household_per_lot:
                     raise HTTPException(
@@ -417,38 +198,29 @@ class LotsService:
                         ),
                     )
 
-        try:
-            cleaned_doc = normalize_document_id(payload.document_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
-        if not cleaned_doc and identity.role not in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
+        doc = _clean_doc(payload.document_id)
+        if not doc and not is_admin:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="El DNI o Carnet de Extranjería del integrante es obligatorio: se le pedirá al activar su cuenta.",
             )
+        # La persona puede ya existir (p. ej. es ANCHOR de otro lote): un ANCHOR solo completa datos vacíos,
+        # nunca reemplaza el nombre o DNI de alguien ya registrado. El Admin sí puede corregirlos.
+        person = await self.people.upsert_person(phone, payload.full_name.strip(), doc, overwrite=is_admin)
+        if doc and person.document_id and person.document_id != doc and not is_admin:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Este celular ya está registrado con otro DNI. Pide al Administrador que lo revise.",
+            )
         membership = await self.repo.upsert_membership(
-            villa_id=norm_villa,
-            lot_id=norm_lot,
-            phone=norm_phone,
-            full_name=payload.full_name.strip(),
-            membership_role=target_role,
-            added_by=identity.username,
-            document_id=cleaned_doc,
-            is_active=True,
+            norm, norm_lot, person.id, target_role, added_by_person_id=identity.person_id, is_active=True
         )
-
         log_audit_event(
             event="LOT_MEMBER_ADDED",
-            actor=f"{norm_villa}:{identity.username}",
+            actor=f"{norm}:{identity.username}",
             client_ip=client_ip,
             user_agent=user_agent,
-            details={
-                "villa_id": norm_villa,
-                "lot_id": norm_lot,
-                "member_phone": norm_phone,
-                "member_name": membership.full_name,
-                "membership_role": str(membership.membership_role),
-            },
+            details={"villa_id": norm, "lot_id": norm_lot, "member_phone": phone, "membership_role": str(target_role)},
         )
         return _masked(membership)
 
@@ -461,52 +233,27 @@ class LotsService:
         client_ip: str = "internal",
         user_agent: str = "unknown",
     ) -> LotMembership:
-        norm_villa = normalize_villa_id(villa_id)
-        norm_lot = normalize_lot_id(lot_id)
-        norm_target_phone = normalize_phone_username(member_phone) or member_phone.strip()
-
-        await self.get_lot(norm_villa, norm_lot)
-        await self._require_lot_member_or_admin(
-            identity, norm_villa, norm_lot, require_anchor=True
-        )
-
-        target_mem = await self.repo.get_membership(
-            norm_villa, norm_lot, norm_target_phone
-        )
-        if not target_mem:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"El integrante '{norm_target_phone}' no está activo en el lote {norm_lot}.",
-            )
-
-        # Un ANCHOR no puede desactivar a otro ANCHOR (solo el ADMIN de la Villa puede hacerlo)
-        if (
-            target_mem.membership_role == MembershipRole.ANCHOR
-            and identity.role not in (UserRole.ADMIN, UserRole.SUPER_ADMIN)
-        ):
+        norm, norm_lot = normalize_villa_id(villa_id), normalize_lot_id(lot_id)
+        await self.get_lot(norm, norm_lot)
+        await self._require_lot_member_or_admin(identity, norm, norm_lot, require_anchor=True)
+        target = await self.repo.get_membership(norm, norm_lot, member_phone)
+        if not target or not target.person_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"El integrante no está activo en el lote {norm_lot}.")
+        if target.membership_role == MembershipRole.ANCHOR and identity.role not in ADMIN_ROLES:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Solo el Administrador de la Villa puede dar de baja a una Persona-Ancla (ANCHOR).",
             )
-
-        deactivated = await self.repo.deactivate_membership(
-            norm_villa, norm_lot, norm_target_phone
-        )
+        deactivated = await self.repo.deactivate_membership(norm, norm_lot, target.person_id)
         assert deactivated is not None
-
         log_audit_event(
             event="LOT_MEMBER_DEACTIVATED",
-            actor=f"{norm_villa}:{identity.username}",
+            actor=f"{norm}:{identity.username}",
             client_ip=client_ip,
             user_agent=user_agent,
-            details={
-                "villa_id": norm_villa,
-                "lot_id": norm_lot,
-                "deactivated_phone": norm_target_phone,
-                "deactivated_name": deactivated.full_name,
-            },
+            details={"villa_id": norm, "lot_id": norm_lot, "deactivated_phone": target.phone},
         )
-        return deactivated
+        return _masked(deactivated)
 
     async def update_lot_member(
         self,
@@ -517,65 +264,36 @@ class LotsService:
         identity: AuthenticatedIdentity,
     ) -> LotMembership:
         """
-        [SOLO ADMIN] Corrige nombre o DNI de un integrante (p. ej. el vecino pidió el cambio por WhatsApp).
-        Si cambia el DNI: se actualiza en TODAS sus membresías de la Villa y se RESTABLECE su acceso
-        (contraseña invalidada, sesiones abiertas cerradas, límite diario de PIN reiniciado). La persona
-        vuelve a entrar como la primera vez: celular + DNI nuevo + PIN por WhatsApp.
+        [SOLO ADMIN] Corrige nombre o DNI de una persona (p. ej. lo pidió por WhatsApp).
+        El DNI vive en people: un cambio de DNI RESTABLECE su acceso (contraseña invalidada,
+        sesiones cerradas, límite diario de PIN reiniciado). Vuelve a entrar con celular + DNI nuevo.
         """
-        if identity.role not in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
+        if identity.role not in ADMIN_ROLES:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo el Administrador puede corregir datos.")
-        norm_villa = normalize_villa_id(villa_id)
-        norm_lot = normalize_lot_id(lot_id)
-        norm_phone = normalize_phone_username(member_phone) or member_phone.strip()
-        current = await self.repo.get_membership(norm_villa, norm_lot, norm_phone)
-        if not current:
+        norm, norm_lot = normalize_villa_id(villa_id), normalize_lot_id(lot_id)
+        current = await self.repo.get_membership(norm, norm_lot, member_phone)
+        if not current or not current.person_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="El integrante no está activo en ese lote.")
-        try:
-            doc = normalize_document_id(payload.document_id) if payload.document_id else None
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
-
+        doc = _clean_doc(payload.document_id) if payload.document_id else None
         doc_changed = bool(doc) and doc != current.document_id
-        targets = await self.repo.list_memberships_by_phone(norm_villa, norm_phone) if doc_changed else [current]
-        updated = current
-        for mem in targets:
-            saved = await self.repo.upsert_membership(
-                villa_id=norm_villa,
-                lot_id=mem.lot_id,
-                phone=norm_phone,
-                full_name=(payload.full_name or mem.full_name).strip() if mem.lot_id == norm_lot else mem.full_name,
-                membership_role=mem.membership_role,
-                added_by=mem.added_by,
-                document_id=doc,
-                is_active=True,
-            )
-            if mem.lot_id == norm_lot:
-                updated = saved
-
+        await self.people.update_person(
+            current.person_id,
+            full_name=payload.full_name.strip() if payload.full_name else None,
+            document_id=doc,
+        )
         access_reset = False
         if doc_changed:
-            user = await self.user_repo.get_user(norm_villa, norm_phone)
-            if user:
-                # Hash de una clave aleatoria que nadie conoce: la contraseña anterior deja de servir.
-                await self.user_repo.update_password(
-                    norm_villa,
-                    norm_phone,
-                    hash_password(secrets.token_urlsafe(24)),
-                    clear_last_login=True,
-                )
+            person = await self.people.get_by_id(current.person_id)
+            if person and person.password_hash:
+                await self.people.reset_access(current.person_id)
                 access_reset = True
-
         log_audit_event(
             event="LOT_MEMBER_DNI_CHANGED_ACCESS_RESET" if doc_changed else "LOT_MEMBER_UPDATED",
-            actor=f"{norm_villa}:{identity.username}",
+            actor=f"{norm}:{identity.username}",
             client_ip="internal",
             user_agent="api",
-            details={
-                "villa_id": norm_villa,
-                "lot_id": norm_lot,
-                "member": norm_phone,
-                "document_changed": doc_changed,
-                "access_reset": access_reset,
-            },
+            details={"villa_id": norm, "lot_id": norm_lot, "member": current.phone, "document_changed": doc_changed, "access_reset": access_reset},
         )
+        updated = await self.repo.get_membership(norm, norm_lot, current.phone)
+        assert updated is not None
         return _masked(updated)

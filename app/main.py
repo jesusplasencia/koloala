@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 
 from app.api.v1.auth import router as auth_router
 from app.api.v1.lots import router as lots_router
+from app.api.v1.staff import router as staff_router
 from app.api.v1.visits import router as visits_router
 from app.core.audit import flush_audit_logs_on_shutdown
 from app.core.config import settings
@@ -54,6 +55,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix=settings.api_v1_prefix)
 app.include_router(lots_router, prefix=settings.api_v1_prefix)
 app.include_router(visits_router, prefix=settings.api_v1_prefix)
+app.include_router(staff_router, prefix=settings.api_v1_prefix)
 
 
 def _build_domain_openapi(

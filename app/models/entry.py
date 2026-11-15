@@ -24,7 +24,7 @@ class EntryLot(BaseModel):
 class EntryEvent(BaseModel):
     villa_id: str
     at: datetime
-    person_phone: str
+    person_id: str
     person_name: str
     lots: list[EntryLot]
     method: EntryMethod

@@ -93,7 +93,7 @@ class VisitPass(BaseModel):
     destination_lot_id: str
     destination_type: LotType
     destination_label: str
-    host_phone: str | None = None
+    host_person_id: str | None = None
     host_name: str | None = None
     host_role: str | None = None
     party_size_expected: int = 1

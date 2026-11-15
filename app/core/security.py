@@ -87,7 +87,7 @@ def _b64url_decode(data: str) -> bytes:
 
 
 def create_access_token(
-    username: str,
+    person_id: str,
     role: UserRole,
     villa_id: str = "VC3",
     lot_id: str | None = None,
@@ -104,7 +104,7 @@ def create_access_token(
     header = {"alg": settings.jwt_algorithm, "typ": "JWT"}
     payload: dict[str, Any] = {
         "villa_id": normalize_villa_id(villa_id),
-        "sub": username,
+        "sub": str(person_id),  # UUID de people.id: el token no expone el celular
         "role": str(role),
         "lot_id": lot_id,
         "membership_role": str(membership_role) if membership_role else None,
@@ -161,28 +161,30 @@ class AuthenticatedIdentity:
         lot_id: str | None,
         membership_role: MembershipRole | None = None,
         full_name: str | None = None,
+        person_id: str | None = None,
     ) -> None:
         self.villa_id = villa_id
-        self.username = username
+        self.person_id = person_id
+        self.username = username  # celular de la persona (resuelto desde people)
         self.role = role
         self.lot_id = lot_id
         self.membership_role = membership_role
         self.full_name = full_name
 
 
-async def get_user_repo() -> AsyncIterator[Any]:
-    """Repositorio de usuarios (importado de forma diferida para evitar ciclos de import)."""
+async def get_people_repo() -> AsyncIterator[Any]:
+    """Repositorio de personas (importado de forma diferida para evitar ciclos de import)."""
     if not settings.use_postgres:
-        from app.repositories.users_repo import in_memory_user_repo
+        from app.repositories.people_repo import in_memory_people_repo
 
-        yield in_memory_user_repo
+        yield in_memory_people_repo
         return
-    from app.db.repositories import PostgresUserRepository
+    from app.db.people_repository import PostgresPeopleRepository
     from app.db.session import AsyncSessionLocal
 
     async with AsyncSessionLocal() as session:
         try:
-            yield PostgresUserRepository(session)
+            yield PostgresPeopleRepository(session)
             await session.commit()
         except Exception:
             await session.rollback()
@@ -192,7 +194,7 @@ async def get_user_repo() -> AsyncIterator[Any]:
 async def get_current_identity(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
-    user_repo: Annotated[Any, Depends(get_user_repo)],
+    people_repo: Annotated[Any, Depends(get_people_repo)],
 ) -> AuthenticatedIdentity:
     if credentials is None or not credentials.credentials:
         raise HTTPException(
@@ -222,9 +224,15 @@ async def get_current_identity(
         if user_role == UserRole.SUPER_ADMIN:
             token_villa = requested_villa
 
+    person = await people_repo.get_by_id(payload["sub"])
+    if person is None or not person.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Tu cuenta ya no está activa. Inicia sesión nuevamente.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     # Sesión revocada: el Administrador restableció el acceso (cambio de DNI) después de emitir este token.
-    stored = await user_repo.get_user(token_villa, payload["sub"])
-    if stored is not None and int(payload.get("tv", 0)) != stored.token_version:
+    if int(payload.get("tv", 0)) != person.token_version:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Tu sesión fue cerrada por administración. Inicia sesión nuevamente.",
@@ -236,11 +244,12 @@ async def get_current_identity(
 
     return AuthenticatedIdentity(
         villa_id=token_villa,
-        username=payload["sub"],
+        username=person.phone,
         role=user_role,
         lot_id=payload.get("lot_id"),
         membership_role=membership_role,
-        full_name=payload.get("full_name"),
+        full_name=person.full_name,
+        person_id=person.id,
     )
 
 

@@ -1,6 +1,5 @@
 import re
 from datetime import datetime
-from urllib.parse import quote
 
 from enum import StrEnum
 
@@ -78,25 +77,6 @@ def normalize_peru_phone(raw_phone: str | None) -> str | None:
     return digits
 
 
-def build_whatsapp_onboarding_url(
-    phone: str | None,
-    villa_id: str,
-    lot_id: str,
-    password: str,
-    login_url: str,
-) -> str | None:
-    norm_phone = normalize_peru_phone(phone)
-    local_phone = normalize_phone_username(phone) or lot_id
-    if not norm_phone:
-        return None
-    message = (
-        f"Hola vecino del lote {lot_id} ({villa_id}). "
-        f"Ya está activo tu acceso rápido a garita en {login_url} | "
-        f"Usuario (Celular): {local_phone} (Lote {lot_id}) | Contraseña: {password}"
-    )
-    return f"https://wa.me/{norm_phone}?text={quote(message)}"
-
-
 # --- Entidad de Dominio: Lote Físico con Llave Compuesta (villa_id, lot_id) ---
 class PropertyLot(BaseModel):
     villa_id: str = Field(
@@ -109,16 +89,14 @@ class PropertyLot(BaseModel):
         examples=["B14", "U28", "P20"],
         description="Identificador corto Manzana y Lote (parte 2 de la llave compuesta)",
     )
-    owner_name: str = Field(default="Propietario")
+    owner_name: str | None = Field(
+        default=None,
+        description="Calculado: nombre del ANCHOR principal (vive en people, no en el lote)",
+    )
     owner_phone: str | None = Field(
         default=None,
         examples=["987654321"],
-        description="Celular (WhatsApp) de la Persona-Ancla (ANCHOR) principal",
-    )
-    owner_email: str | None = Field(
-        default=None,
-        examples=["vecino.p20@gmail.com"],
-        description="Correo electrónico del propietario (opcional)",
+        description="Calculado: celular del ANCHOR principal",
     )
     is_maintenance_up_to_date: bool
     lot_type: LotType = Field(
@@ -164,10 +142,11 @@ class LotMembership(BaseModel):
         examples=["P20", "Q02", "Q03"],
         description="Código de lote físico (Foreign Key hacia property_lots)",
     )
+    person_id: str | None = Field(default=None, description="UUID de la persona (people.id)")
     phone: str = Field(
         ...,
         examples=["916220518", "980180219"],
-        description="Número de celular (9 dígitos) que identifica a la persona",
+        description="Celular de la persona (calculado desde people)",
     )
     full_name: str = Field(
         ...,
@@ -258,16 +237,6 @@ class UpdateLotMaintenanceRequest(BaseModel):
         max_length=100,
         description="Opcional: actualizar el nombre de la Persona-Ancla",
     )
-    owner_phone: str | None = Field(
-        default=None,
-        max_length=30,
-        description="Opcional: actualizar el celular/WhatsApp de la Persona-Ancla",
-    )
-    owner_email: str | None = Field(
-        default=None,
-        max_length=150,
-        description="Opcional: actualizar el correo electrónico del propietario",
-    )
 
 
 class BulkLotItem(BaseModel):
@@ -289,12 +258,6 @@ class BulkLotItem(BaseModel):
         max_length=30,
         examples=["987654321"],
         description="Celular de WhatsApp de la Persona-Ancla (ANCHOR)",
-    )
-    owner_email: str | None = Field(
-        default=None,
-        max_length=150,
-        examples=["vecino.p20@gmail.com"],
-        description="Opcional: correo electrónico del propietario",
     )
     owner_document_id: str | None = Field(
         default=None,
@@ -325,39 +288,12 @@ class BulkUpsertLotsRequest(BaseModel):
     )
 
 
-class GeneratedLotCredential(BaseModel):
-    villa_id: str
-    lot_id: str
-    username: str
-    owner_name: str = "Propietario"
-    owner_phone: str | None = None
-    owner_email: str | None = None
-    initial_password: str = Field(
-        ...,
-        examples=["48291057"],
-        description="Contraseña numérica de 8 dígitos autogenerada (fácil para adultos mayores y segura con bloqueo de IP)",
-    )
-    login_url: str = Field(
-        ...,
-        examples=["https://vc3.lasvillas.club"],
-        description="URL del portal correspondiente a la Villa del vecino",
-    )
-    whatsapp_share_url: str | None = Field(
-        default=None,
-        description="Link directo wa.me con mensaje pre-armado si el lote cuenta con owner_phone",
-    )
-
-
 class BulkUpsertLotsResponse(BaseModel):
     villa_id: str
     processed_count: int
     created_count: int
     updated_count: int
     lots: list[PropertyLot]
-    generated_credentials: list[GeneratedLotCredential] = Field(
-        default_factory=list,
-        description="Credenciales iniciales generadas únicamente para los lotes nuevos creados",
-    )
 
 
 class PaginatedLotsResponse(BaseModel):

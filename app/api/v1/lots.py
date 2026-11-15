@@ -6,13 +6,12 @@ from fastapi import APIRouter, Depends, Query, Request, status
 from app.core.audit import get_client_ip, get_user_agent
 from app.core.config import settings
 from app.core.security import AdminDep, CurrentIdentityDep
-from app.db.repositories import PostgresLotRepository, PostgresUserRepository
+from app.db.repositories import PostgresLotRepository
 from app.db.session import AsyncSessionLocal
 from app.models.lot import (
     AddHouseholdMemberRequest,
     BulkUpsertLotsRequest,
     BulkUpsertLotsResponse,
-    GeneratedLotCredential,
     LotMembership,
     PaginatedLotsResponse,
     PropertyLot,
@@ -20,7 +19,6 @@ from app.models.lot import (
     UpdateMemberRequest,
 )
 from app.repositories.lots_repo import in_memory_lot_repo
-from app.repositories.users_repo import in_memory_user_repo
 from app.services.lots_service import LotsService
 
 router = APIRouter(prefix="/lots", tags=["Maintenance of Lots & 3NF Memberships"])
@@ -28,15 +26,12 @@ router = APIRouter(prefix="/lots", tags=["Maintenance of Lots & 3NF Memberships"
 
 async def get_lots_service() -> AsyncIterator[LotsService]:
     if not settings.use_postgres:
-        yield LotsService(repo=in_memory_lot_repo, user_repo=in_memory_user_repo)
+        yield LotsService(repo=in_memory_lot_repo)
         return
-    # Unit of Work: LotRepository y UserRepository comparten la misma transacción atómica
+    # Unit of Work: lotes, membresías y personas comparten la misma transacción
     async with AsyncSessionLocal() as session:
         try:
-            yield LotsService(
-                repo=PostgresLotRepository(session),
-                user_repo=PostgresUserRepository(session),
-            )
+            yield LotsService(repo=PostgresLotRepository(session))
             await session.commit()
         except Exception:
             await session.rollback()
@@ -115,31 +110,11 @@ async def update_single_lot_maintenance(
     admin: AdminDep,
     service: LotsServiceDep,
 ) -> PropertyLot:
-    """[SOLO ADMIN] Habilita o pasa a mora un lote individual (y opcionalmente actualiza teléfono/email)."""
+    """[SOLO ADMIN] Habilita o pasa a mora un lote (y opcionalmente corrige el nombre del titular)."""
     return await service.update_lot_maintenance(
         villa_id=admin.villa_id,
         lot_id=lot_id,
         payload=payload,
-        actor=admin.username,
-        client_ip=get_client_ip(request),
-        user_agent=get_user_agent(request),
-    )
-
-
-@router.post("/{lot_id}/reset-password", response_model=GeneratedLotCredential)
-async def reset_lot_resident_password(
-    lot_id: str,
-    request: Request,
-    admin: AdminDep,
-    service: LotsServiceDep,
-) -> GeneratedLotCredential:
-    """
-    [SOLO ADMIN] Genera una nueva contraseña numérica de 8 dígitos para un lote
-    (ideal cuando un vecino olvida su clave o cambia de celular) y devuelve el link de WhatsApp.
-    """
-    return await service.reset_lot_password(
-        villa_id=admin.villa_id,
-        lot_id=lot_id,
         actor=admin.username,
         client_ip=get_client_ip(request),
         user_agent=get_user_agent(request),
@@ -154,8 +129,8 @@ async def bulk_sync_lots(
     service: LotsServiceDep,
 ) -> BulkUpsertLotsResponse:
     """
-    [SOLO ADMIN] Carga o actualiza en bloque la lista de lotes de la Villa (con teléfono y/o email opcionales).
-    Para cada lote nuevo, autogenera su clave de 8 dígitos y link directo de WhatsApp (wa.me).
+    [SOLO ADMIN] Carga o actualiza en bloque los lotes de la Villa. Si traen celular, crea/actualiza
+    a la persona titular (nombre, DNI) y su membresía ANCHOR. La persona activa su cuenta con su DNI.
     """
     return await service.bulk_upsert_lots(
         villa_id=admin.villa_id,

@@ -24,41 +24,42 @@ from app.repositories.visit_repo import VisitRepositoryProtocol
 _PREFIX = "R1"
 
 
-def _sign(villa: str, phone: str, window: int) -> str:
-    msg = f"{villa}|{phone}|{window}".encode()
+def _sign(villa: str, person_id: str, window: int) -> str:
+    msg = f"{villa}|{person_id}|{window}".encode()
     return hmac.new(settings.resident_qr_secret.encode(), msg, hashlib.sha256).hexdigest()[:16]
 
 
-def build_carnet_payload(villa: str, phone: str, now_s: float | None = None) -> tuple[str, int]:
+def build_carnet_payload(villa: str, person_id: str, now_s: float | None = None) -> tuple[str, int]:
+    """El QR lleva el UUID de la persona (no su celular)."""
     w = settings.resident_qr_window_seconds
     t = time.time() if now_s is None else now_s
     window = int(t // w)
     expires_in = w - int(t % w)
-    return f"{_PREFIX}.{villa}.{phone}.{window}.{_sign(villa, phone, window)}", expires_in
+    return f"{_PREFIX}.{villa}.{person_id}.{window}.{_sign(villa, person_id, window)}", expires_in
 
 
 def parse_carnet_payload(payload: str, now_s: float | None = None) -> tuple[str, str] | None:
-    """Devuelve (villa, phone) si la firma es válida y la ventana es la actual ±1."""
+    """Devuelve (villa, person_id) si la firma es válida y la ventana es la actual ±1."""
     parts = payload.strip().split(".")
     if len(parts) != 5 or parts[0] != _PREFIX or not parts[3].isdigit():
         return None
-    _, villa, phone, window_s, sig = parts
+    _, villa, person_id, window_s, sig = parts
     window = int(window_s)
     t = time.time() if now_s is None else now_s
     current = int(t // settings.resident_qr_window_seconds)
     if abs(current - window) > 1:
         return None
-    if not hmac.compare_digest(sig, _sign(villa, phone, window)):
+    if not hmac.compare_digest(sig, _sign(villa, person_id, window)):
         return None
-    return villa, phone
+    return villa, person_id
 
 
 class EntryService:
     def __init__(self, repo: VisitRepositoryProtocol) -> None:
         self.repo = repo
 
-    async def _active_lots(self, villa: str, phone: str) -> tuple[str | None, list[EntryLot]]:
-        mems = await self.repo.list_memberships_by_phone(villa, phone)
+    async def _active_lots(self, villa: str, person_id: str) -> tuple[str | None, list[EntryLot]]:
+        mems = await self.repo.list_memberships_by_person(villa, person_id)
         lots: list[EntryLot] = []
         name: str | None = None
         for m in sorted(mems, key=lambda m: (str(m.membership_role), m.lot_id)):
@@ -75,19 +76,19 @@ class EntryService:
 
     async def carnet(self, identity: AuthenticatedIdentity) -> CarnetResponse:
         villa = normalize_villa_id(identity.villa_id)
-        phone = normalize_phone_username(identity.username) or identity.username
-        name, lots = await self._active_lots(villa, phone)
+        person_id = identity.person_id or ""
+        name, lots = await self._active_lots(villa, person_id)
         if not lots:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
                 f"No tienes membresía activa (ANCHOR ni HOUSEHOLD) en {villa}; no hay carnet.",
             )
-        payload, expires_in = build_carnet_payload(villa, phone)
+        payload, expires_in = build_carnet_payload(villa, person_id)
         return CarnetResponse(
             payload=payload,
             expires_in=expires_in,
             window_seconds=settings.resident_qr_window_seconds,
-            full_name=name or identity.full_name or phone,
+            full_name=name or identity.full_name or identity.username,
             lots=lots,
         )
 
@@ -102,17 +103,18 @@ class EntryService:
                     status.HTTP_409_CONFLICT,
                     "CARNET NO VÁLIDO o vencido: pide al residente que abra su carnet de nuevo.",
                 )
-            qr_villa, phone = parsed
+            qr_villa, person_id = parsed
             if qr_villa != villa:
                 raise HTTPException(
                     status.HTTP_409_CONFLICT, f"Este carnet es de {qr_villa}, no de {villa}."
                 )
             method = EntryMethod.QR
         else:
-            phone = normalize_phone_username(payload.phone) or ""
+            person = await self.repo.get_person_by_phone(normalize_phone_username(payload.phone) or "")
+            person_id = person.id if person else ""
             method = EntryMethod.MANUAL
 
-        name, lots = await self._active_lots(villa, phone)
+        name, lots = await self._active_lots(villa, person_id) if person_id else (None, [])
         if method == EntryMethod.MANUAL:
             wanted = normalize_lot_id(payload.lot_id or "")
             if not any(lot.lot_id == wanted for lot in lots):
@@ -131,8 +133,8 @@ class EntryService:
         event = EntryEvent(
             villa_id=villa,
             at=now,
-            person_phone=phone,
-            person_name=name or phone,
+            person_id=person_id,
+            person_name=name or "Residente",
             lots=lots,
             method=method,
             guard=guard.username,
@@ -164,8 +166,7 @@ class EntryService:
 
     async def my_entries(self, identity: AuthenticatedIdentity, limit: int = 100) -> MyEntriesResponse:
         villa = normalize_villa_id(identity.villa_id)
-        phone = normalize_phone_username(identity.username) or identity.username
-        events = await self.repo.list_entry_events(villa, person_phone=phone, limit=limit)
+        events = await self.repo.list_entry_events(villa, person_id=identity.person_id, limit=limit)
         return MyEntriesResponse(villa_id=villa, items=[self._view(e) for e in events])
 
     async def search(
