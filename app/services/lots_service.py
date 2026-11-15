@@ -1,10 +1,11 @@
+import secrets
 import math
 
 from fastapi import HTTPException, status
 
 from app.core.audit import log_audit_event
 from app.core.config import settings
-from app.core.pii import normalize_document_id
+from app.core.pii import mask_doc, normalize_document_id
 from app.core.security import (
     AuthenticatedIdentity,
     generate_initial_lot_password,
@@ -28,6 +29,11 @@ from app.models.lot import (
 from app.models.user import MembershipRole, UserRole
 from app.repositories.lots_repo import LotRepositoryProtocol
 from app.repositories.users_repo import UserRepositoryProtocol, in_memory_user_repo
+
+
+def _masked(mem: LotMembership) -> LotMembership:
+    """El DNI completo nunca sale al navegador: solo ******NN."""
+    return mem.model_copy(update={"document_id": mask_doc(None, mem.document_id[-2:]) if mem.document_id else None})
 
 
 class LotsService:
@@ -284,7 +290,7 @@ class LotsService:
             identity.villa_id, identity.username
         )
         if memberships:
-            return memberships
+            return [_masked(m) for m in memberships]
 
         # Compatibilidad si ingresó con código de lote directo (ej. B14)
         if identity.lot_id:
@@ -353,7 +359,7 @@ class LotsService:
         await self._require_lot_member_or_admin(
             identity, norm_villa, norm_lot, require_anchor=False
         )
-        return await self.repo.list_lot_members(norm_villa, norm_lot)
+        return [_masked(m) for m in await self.repo.list_lot_members(norm_villa, norm_lot)]
 
     async def add_lot_member(
         self,
@@ -444,7 +450,7 @@ class LotsService:
                 "membership_role": str(membership.membership_role),
             },
         )
-        return membership
+        return _masked(membership)
 
     async def deactivate_lot_member(
         self,
@@ -510,7 +516,12 @@ class LotsService:
         payload: UpdateMemberRequest,
         identity: AuthenticatedIdentity,
     ) -> LotMembership:
-        """[SOLO ADMIN] Corrige el nombre o el DNI de un integrante (sin DELETE, vía UPDATE)."""
+        """
+        [SOLO ADMIN] Corrige nombre o DNI de un integrante (p. ej. el vecino pidió el cambio por WhatsApp).
+        Si cambia el DNI: se actualiza en TODAS sus membresías de la Villa y se RESTABLECE su acceso
+        (contraseña invalidada, sesiones abiertas cerradas, límite diario de PIN reiniciado). La persona
+        vuelve a entrar como la primera vez: celular + DNI nuevo + PIN por WhatsApp.
+        """
         if identity.role not in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo el Administrador puede corregir datos.")
         norm_villa = normalize_villa_id(villa_id)
@@ -523,21 +534,48 @@ class LotsService:
             doc = normalize_document_id(payload.document_id) if payload.document_id else None
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
-        updated = await self.repo.upsert_membership(
-            villa_id=norm_villa,
-            lot_id=norm_lot,
-            phone=norm_phone,
-            full_name=(payload.full_name or current.full_name).strip(),
-            membership_role=current.membership_role,
-            added_by=current.added_by,
-            document_id=doc,
-            is_active=True,
-        )
+
+        doc_changed = bool(doc) and doc != current.document_id
+        targets = await self.repo.list_memberships_by_phone(norm_villa, norm_phone) if doc_changed else [current]
+        updated = current
+        for mem in targets:
+            saved = await self.repo.upsert_membership(
+                villa_id=norm_villa,
+                lot_id=mem.lot_id,
+                phone=norm_phone,
+                full_name=(payload.full_name or mem.full_name).strip() if mem.lot_id == norm_lot else mem.full_name,
+                membership_role=mem.membership_role,
+                added_by=mem.added_by,
+                document_id=doc,
+                is_active=True,
+            )
+            if mem.lot_id == norm_lot:
+                updated = saved
+
+        access_reset = False
+        if doc_changed:
+            user = await self.user_repo.get_user(norm_villa, norm_phone)
+            if user:
+                # Hash de una clave aleatoria que nadie conoce: la contraseña anterior deja de servir.
+                await self.user_repo.update_password(
+                    norm_villa,
+                    norm_phone,
+                    hash_password(secrets.token_urlsafe(24)),
+                    clear_last_login=True,
+                )
+                access_reset = True
+
         log_audit_event(
-            event="LOT_MEMBER_UPDATED",
+            event="LOT_MEMBER_DNI_CHANGED_ACCESS_RESET" if doc_changed else "LOT_MEMBER_UPDATED",
             actor=f"{norm_villa}:{identity.username}",
             client_ip="internal",
             user_agent="api",
-            details={"villa_id": norm_villa, "lot_id": norm_lot, "document_updated": bool(doc)},
+            details={
+                "villa_id": norm_villa,
+                "lot_id": norm_lot,
+                "member": norm_phone,
+                "document_changed": doc_changed,
+                "access_reset": access_reset,
+            },
         )
-        return updated
+        return _masked(updated)

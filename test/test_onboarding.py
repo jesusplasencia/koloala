@@ -96,7 +96,7 @@ async def test_anchor_must_provide_household_dni_and_admin_can_fix_it(client, re
         f"{API}/lots/B14/members", headers=ANCHOR_B14,
         json={"phone": "955000555", "full_name": "Con Dni", "document_id": "4011-1222"},
     )
-    assert ok.status_code == 201 and ok.json()["document_id"] == "40111222"
+    assert ok.status_code == 201 and ok.json()["document_id"] == "******22"
 
     # El admin carga a alguien sin DNI y luego lo corrige con PATCH
     await client.post(f"{API}/lots/B14/members", headers=ADMIN, json={"phone": "955000666", "full_name": "Pendiente"})
@@ -105,7 +105,7 @@ async def test_anchor_must_provide_household_dni_and_admin_can_fix_it(client, re
     anchor_try = await client.patch(f"{API}/lots/B14/members/955000666", headers=ANCHOR_B14, json={"document_id": "40999888"})
     assert anchor_try.status_code == 403
     fixed = await client.patch(f"{API}/lots/B14/members/955000666", headers=ADMIN, json={"document_id": "40999888"})
-    assert fixed.status_code == 200 and fixed.json()["document_id"] == "40999888"
+    assert fixed.status_code == 200 and fixed.json()["document_id"] == "******88"
     activated = await client.post(f"{API}/auth/activate-pin", json={"username": "955000666", "document_id": "40999888"})
     assert activated.status_code == 200
 
@@ -124,3 +124,48 @@ async def test_bulk_csv_stores_owner_dni(client, repos, sent):
     }
     act = await client.post(f"{API}/auth/activate-pin", json={"username": "955000777", "document_id": "40777888"})
     assert act.status_code == 200
+
+
+async def test_admin_dni_change_resets_access_and_closes_sessions(client, repos, sent, monkeypatch):
+    """Un vecino pide por WhatsApp corregir su DNI: el admin lo cambia y su acceso se restablece."""
+    lot_repo, user_repo = repos
+    await _member(lot_repo, "955000888", "40100100")
+    pins: list[str] = []
+
+    async def capture(*, phone, villa_id, lot_id, owner_name, pin_password):
+        pins.append(pin_password)
+        return True, "mock"
+
+    monkeypatch.setattr(auth_module, "send_whatsapp_pin_notification", capture)
+    body = {"username": "955000888", "document_id": "40100100"}
+    for _ in range(3):  # agota su límite diario
+        assert (await client.post(f"{API}/auth/activate-pin", json=body)).status_code == 200
+    login = await client.post(f"{API}/auth/login", json={"username": "955000888", "password": pins[-1]})
+    assert login.status_code == 200
+    old_token = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    assert (await client.get(f"{API}/lots/my-memberships", headers=old_token)).status_code == 200
+
+    members = await client.get(f"{API}/lots/B14/members", headers=ADMIN)
+    assert "40100100" not in members.text  # nunca se expone el DNI completo
+
+    changed = await client.patch(f"{API}/lots/B14/members/955000888", headers=ADMIN, json={"document_id": "40200200"})
+    assert changed.status_code == 200 and changed.json()["document_id"] == "******00"
+
+    # Sesión abierta cerrada, contraseña anterior inválida y vuelve a "primer ingreso"
+    assert (await client.get(f"{API}/lots/my-memberships", headers=old_token)).status_code == 401
+    assert (await client.post(f"{API}/auth/login", json={"username": "955000888", "password": pins[-1]})).status_code == 401
+    lookup = await client.post(f"{API}/auth/lookup", json={"username": "955000888"})
+    assert lookup.json()["status"] == "NEEDS_DOCUMENT"
+
+    # El DNI viejo ya no sirve; el nuevo sí, y el límite diario se reinició
+    assert (await client.post(f"{API}/auth/activate-pin", json=body)).status_code == 400
+    again = await client.post(f"{API}/auth/activate-pin", json={"username": "955000888", "document_id": "40200200"})
+    assert again.status_code == 200
+    relogin = await client.post(f"{API}/auth/login", json={"username": "955000888", "password": pins[-1]})
+    assert relogin.status_code == 200
+
+
+async def test_only_admin_can_change_dni(client, repos, sent):
+    await _member(repos[0], "955000999", "40300300")
+    r = await client.patch(f"{API}/lots/B14/members/955000999", headers=ANCHOR_B14, json={"document_id": "40400400"})
+    assert r.status_code == 403

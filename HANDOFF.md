@@ -58,3 +58,9 @@ DROP TABLE IF EXISTS
 CASCADE;
 ```
 Luego: `uv run alembic upgrade head` y `uv run python -m app.db.seed`. Definir en Railway `PII_HMAC_SECRET` y `RESIDENT_QR_SECRET`.
+
+## 8. Primer ingreso con DNI y reset de acceso (2026-11-15)
+- `lookup` solo devuelve estado (sin nombre/rol/lotes). `activate-pin` exige DNI/CE registrado; 3 fallos bloquean IP; máx. 3 PIN/número/24 h (`pin_requests`).
+- Admin `PATCH /lots/{lot}/members/{phone}` con DNI nuevo: actualiza todas las membresías del número, invalida la contraseña, cierra sesiones (`users.token_version` en el JWT como `tv`) y reinicia el límite de PIN (`users.access_reset_at`). Migraciones 0003 y 0004 aplicadas.
+- Los DNI salen enmascarados (`******NN`) en las listas de miembros.
+- `test/conftest.py` fuerza repositorios en memoria (los tests nunca tocan Supabase).

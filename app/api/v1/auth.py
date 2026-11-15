@@ -12,6 +12,7 @@ from app.core.security import (
     CurrentIdentityDep,
     VillaIdDep,
     create_access_token,
+    get_user_repo,
     generate_initial_lot_password,
     hash_password,
     verify_password,
@@ -42,19 +43,6 @@ from app.repositories.lots_repo import LotRepositoryProtocol, in_memory_lot_repo
 from app.repositories.users_repo import UserRepositoryProtocol, in_memory_user_repo
 
 router = APIRouter(prefix="/auth", tags=["Authentication & Security"])
-
-
-async def get_user_repo() -> AsyncIterator[UserRepositoryProtocol]:
-    if not settings.use_postgres:
-        yield in_memory_user_repo
-        return
-    async with AsyncSessionLocal() as session:
-        try:
-            yield PostgresUserRepository(session)
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
 
 
 async def get_lot_repo() -> AsyncIterator[LotRepositoryProtocol]:
@@ -181,6 +169,8 @@ async def activate_lot_pin_via_whatsapp(
         )
 
     since = datetime.now(UTC) - timedelta(hours=24)
+    if existing_user and existing_user.access_reset_at and existing_user.access_reset_at > since:
+        since = existing_user.access_reset_at  # el Admin restableció el acceso: el conteo vuelve a cero
     if await user_repo.count_pin_requests(villa_id, phone, since) >= settings.max_pin_sends_per_phone_per_day:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -403,6 +393,7 @@ async def login(
         lot_id=effective_lot_id,
         membership_role=effective_mem_role,
         full_name=effective_name,
+        token_version=user.token_version,
     )
 
     log_audit_event(

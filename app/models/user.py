@@ -54,6 +54,8 @@ class User(BaseModel):
     is_active: bool = True
     last_login_at: datetime | None = None
     last_login_ip: str | None = None
+    token_version: int = 0
+    access_reset_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

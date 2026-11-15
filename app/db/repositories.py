@@ -416,6 +416,8 @@ class PostgresUserRepository:
             is_active=row.is_active,
             last_login_at=row.last_login_at,
             last_login_ip=row.last_login_ip,
+            token_version=row.token_version or 0,
+            access_reset_at=row.access_reset_at,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -590,15 +592,21 @@ class PostgresUserRepository:
         row.password_hash = new_password_hash
         if clear_last_login:
             row.last_login_at = None
+            row.token_version = (row.token_version or 0) + 1
+            row.access_reset_at = now
         row.updated_at = now
 
         if norm_user.isdigit() and len(norm_user) == 9:
             stmt = select(UserORM).where(UserORM.username == norm_user)
             all_rows = (await self.session.execute(stmt)).scalars().all()
             for r in all_rows:
+                if r is row:
+                    continue
                 r.password_hash = new_password_hash
                 if clear_last_login:
                     r.last_login_at = None
+                    r.token_version = (r.token_version or 0) + 1
+                    r.access_reset_at = now
                 r.updated_at = now
 
         await self.session.flush()

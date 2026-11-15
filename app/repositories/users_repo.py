@@ -363,19 +363,18 @@ class InMemoryUserRepository:
             return None
 
         now = datetime.now(UTC)
-        user.password_hash = new_password_hash
-        if clear_last_login:
-            user.last_login_at = None
-        user.updated_at = now
-
+        targets = [user]
         # Si es un teléfono de 9 dígitos, mantener sincronizada su única contraseña en todas las villas
         if norm_user.isdigit() and len(norm_user) == 9:
-            for u in self._users.values():
-                if u.username == norm_user:
-                    u.password_hash = new_password_hash
-                    if clear_last_login:
-                        u.last_login_at = None
-                    u.updated_at = now
+            targets = [u for u in self._users.values() if u.username == norm_user] or [user]
+        for u in targets:
+            u.password_hash = new_password_hash
+            if clear_last_login:
+                # Restablecimiento de acceso: cierra sesiones abiertas y reinicia el límite de PINs
+                u.last_login_at = None
+                u.token_version += 1
+                u.access_reset_at = now
+            u.updated_at = now
         return user
 
     async def record_login_success(

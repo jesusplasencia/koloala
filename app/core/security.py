@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 import base64
 import hashlib
 import hmac
@@ -93,6 +94,7 @@ def create_access_token(
     membership_role: MembershipRole | str | None = None,
     full_name: str | None = None,
     expires_delta: timedelta | None = None,
+    token_version: int = 0,
 ) -> str:
     """Crea un JWT firmado con HMAC-SHA256 válido por 30 días, sellado con el villa_id."""
     now = datetime.now(UTC)
@@ -107,6 +109,7 @@ def create_access_token(
         "lot_id": lot_id,
         "membership_role": str(membership_role) if membership_role else None,
         "full_name": full_name,
+        "tv": token_version,
         "iat": int(now.timestamp()),
         "exp": int(expire.timestamp()),
     }
@@ -167,9 +170,29 @@ class AuthenticatedIdentity:
         self.full_name = full_name
 
 
+async def get_user_repo() -> AsyncIterator[Any]:
+    """Repositorio de usuarios (importado de forma diferida para evitar ciclos de import)."""
+    if not settings.use_postgres:
+        from app.repositories.users_repo import in_memory_user_repo
+
+        yield in_memory_user_repo
+        return
+    from app.db.repositories import PostgresUserRepository
+    from app.db.session import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as session:
+        try:
+            yield PostgresUserRepository(session)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
 async def get_current_identity(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    user_repo: Annotated[Any, Depends(get_user_repo)],
 ) -> AuthenticatedIdentity:
     if credentials is None or not credentials.credentials:
         raise HTTPException(
@@ -198,6 +221,15 @@ async def get_current_identity(
             )
         if user_role == UserRole.SUPER_ADMIN:
             token_villa = requested_villa
+
+    # Sesión revocada: el Administrador restableció el acceso (cambio de DNI) después de emitir este token.
+    stored = await user_repo.get_user(token_villa, payload["sub"])
+    if stored is not None and int(payload.get("tv", 0)) != stored.token_version:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Tu sesión fue cerrada por administración. Inicia sesión nuevamente.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     raw_mem = payload.get("membership_role")
     membership_role = MembershipRole(raw_mem) if raw_mem else None
