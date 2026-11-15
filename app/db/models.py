@@ -240,3 +240,16 @@ class EntryEventORM(Base):
     guard: Mapped[str] = mapped_column(String(30), nullable=False)
     vehicle_plate: Mapped[str | None] = mapped_column(String(20), nullable=True)
     plate_hmac: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+
+class PinRequestORM(Base):
+    """Tabla 'pin_requests' (solo INSERT): cada solicitud de PIN por WhatsApp, para limitar envíos por número."""
+
+    __tablename__ = "pin_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    villa_id: Mapped[str] = mapped_column(String(15), nullable=False)
+    phone: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    client_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)

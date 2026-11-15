@@ -56,6 +56,8 @@ class UserRepositoryProtocol(Protocol):
     ) -> BlockedIPReport | None: ...
     async def list_blocked_ips(self, villa_id: str) -> list[BlockedIPReport]: ...
     async def unblock_ip(self, villa_id: str, client_ip: str) -> bool: ...
+    async def record_pin_request(self, villa_id: str, phone: str, client_ip: str, ok: bool) -> None: ...
+    async def count_pin_requests(self, villa_id: str, phone: str, since: datetime) -> int: ...
 
 
 class _IPTrackingState:
@@ -76,6 +78,7 @@ def _lazy_hash(password: str) -> str:
 class InMemoryUserRepository:
     def __init__(self) -> None:
         now = datetime.now(UTC)
+        self.pin_requests: list[tuple[str, str, datetime, str, bool]] = []
         # Llave compuesta: (villa_id, username)
         # Incluye:
         # - 916220518: Super Admin de la App (Jesús Plasencia) + ANCHOR de P20 en VC3
@@ -458,6 +461,14 @@ class InMemoryUserRepository:
         state.attempted_usernames = []
         state.blocked_at = None
         return True
+
+
+    async def record_pin_request(self, villa_id: str, phone: str, client_ip: str, ok: bool) -> None:
+        self.pin_requests.append((normalize_villa_id(villa_id), phone, datetime.now(UTC), client_ip, ok))
+
+    async def count_pin_requests(self, villa_id: str, phone: str, since: datetime) -> int:
+        norm = normalize_villa_id(villa_id)
+        return sum(1 for v, p, at, _, ok in self.pin_requests if v == norm and p == phone and ok and at >= since)
 
 
 in_memory_user_repo = InMemoryUserRepository()

@@ -1,4 +1,6 @@
+import hmac
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -14,6 +16,7 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
+from app.core.pii import normalize_doc, normalize_document_id
 from app.core.whatsapp import send_whatsapp_pin_notification
 from app.db.repositories import PostgresLotRepository, PostgresUserRepository
 from app.db.session import AsyncSessionLocal
@@ -79,82 +82,38 @@ async def lookup_user_login_state(
     lot_repo: LotRepoDep,
 ) -> UserLookupResponse:
     """
-    Paso 1 del Login Inteligente: recibe el número de celular ('916220518', '980180219')
-    o el código de lote/usuario ('P21', 'ADMIN').
-    - Si ya tiene PIN activo (last_login_at != None), devuelve READY_FOR_PASSWORD.
-    - Si está precargado como ANCHOR o HOUSEHOLD en la tabla 3NF lot_memberships (o en property_lots)
-      y aún nunca ha iniciado sesión, devuelve NEEDS_PHONE_ACTIVATION.
-    - Si no tiene cuenta, devuelve UNREGISTERED_NO_ACCOUNT: los visitantes no crean cuenta,
-      entran con el QR de su anfitrión o del cartel de garita. Nunca se expone el teléfono de nadie.
+    Paso 1 del login: recibe el celular de 9 dígitos (o un usuario de staff como GUARDIA1).
+    - READY_FOR_PASSWORD: ya tiene PIN/contraseña activa.
+    - NEEDS_DOCUMENT: está en el padrón (ANCHOR/HOUSEHOLD) y aún no activa su cuenta; el siguiente
+      paso le pide su DNI/CE antes de enviar el PIN por WhatsApp (anti-spam).
+    - UNREGISTERED_NO_ACCOUNT: los visitantes no crean cuenta.
+    SEGURIDAD: nunca devuelve nombre, rol ni lotes antes de autenticar (evita enumerar vecinos).
     """
     norm_username = normalize_lot_id(payload.username)
     user = await user_repo.get_user(villa_id, norm_username)
-    lot = await lot_repo.get_lot(villa_id, norm_username)
     memberships = await lot_repo.list_memberships_by_phone(villa_id, norm_username)
 
-    available_lots = [m.lot_id for m in memberships]
-    primary_membership = memberships[0] if memberships else None
-
-    # 1. Si el usuario existe y ya inició sesión (o es cuenta de staff activa) -> pide su PIN
     if user and (
         user.last_login_at is not None
         or user.role in (UserRole.SUPER_ADMIN, UserRole.ADMIN, UserRole.GUARD)
     ):
-        mem_role = (
-            primary_membership.membership_role
-            if primary_membership
-            else (MembershipRole.ANCHOR if user.lot_id else None)
+        return UserLookupResponse(
+            villa_id=villa_id, username=norm_username, status=UserLookupStatus.READY_FOR_PASSWORD
         )
+
+    if memberships:
         return UserLookupResponse(
             villa_id=villa_id,
             username=norm_username,
-            status=UserLookupStatus.READY_FOR_PASSWORD,
-            owner_name=(
-                primary_membership.full_name
-                if primary_membership
-                else (user.full_name or (lot.owner_name if lot else None))
-            ),
-            role=user.role,
-            membership_role=mem_role,
-            available_lots=available_lots or ([user.lot_id] if user.lot_id else []),
+            status=UserLookupStatus.NEEDS_DOCUMENT,
+            message="Confirma tu DNI o Carnet de Extranjería para recibir tu PIN por WhatsApp.",
         )
 
-    # 2. Si es un teléfono precargado en lot_memberships (ANCHOR o HOUSEHOLD) que aún no tiene PIN activo
-    #    (no se devuelve pista de dígitos: el propio celular ES el username)
-    if primary_membership:
+    if user:
         return UserLookupResponse(
-            villa_id=villa_id,
-            username=norm_username,
-            status=UserLookupStatus.NEEDS_PHONE_ACTIVATION,
-            owner_name=primary_membership.full_name,
-            role=UserRole.RESIDENT,
-            membership_role=primary_membership.membership_role,
-            available_lots=available_lots,
+            villa_id=villa_id, username=norm_username, status=UserLookupStatus.READY_FOR_PASSWORD
         )
 
-    # 3. Compatibilidad lote directo ('P21'): lote cargado en padrón con celular pero sin primer login
-    if lot and lot.owner_phone and not (user and user.last_login_at):
-        return UserLookupResponse(
-            villa_id=villa_id,
-            username=norm_username,
-            status=UserLookupStatus.NEEDS_PHONE_ACTIVATION,
-            owner_name=lot.owner_name,
-            role=UserRole.RESIDENT,
-            membership_role=MembershipRole.ANCHOR,
-            available_lots=[lot.lot_id],
-        )
-
-    if user or lot:
-        return UserLookupResponse(
-            villa_id=villa_id,
-            username=norm_username,
-            status=UserLookupStatus.READY_FOR_PASSWORD,
-            owner_name=lot.owner_name if lot else (user.full_name if user else None),
-            role=user.role if user else UserRole.RESIDENT,
-        )
-
-    # 4. Celular de 9 dígitos sin cuenta: los visitantes NO crean cuenta.
-    # SEGURIDAD: jamás se expone el teléfono del Administrador ni de residentes a desconocidos.
     if norm_username.isdigit() and len(norm_username) == 9:
         return UserLookupResponse(
             villa_id=villa_id,
@@ -168,7 +127,7 @@ async def lookup_user_login_state(
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
-        detail=f"El lote o usuario '{norm_username}' no está registrado en {villa_id}.",
+        detail=f"El usuario '{norm_username}' no está registrado en {villa_id}.",
     )
 
 
@@ -181,16 +140,16 @@ async def activate_lot_pin_via_whatsapp(
     lot_repo: LotRepoDep,
 ) -> ActivateLotPinResponse:
     """
-    Paso 1B (Activación Just-In-Time en 1er Ingreso para ANCHOR o HOUSEHOLD):
-    Verifica que el número de WhatsApp coincida con la membresía 3NF o padrón del lote.
-    Si falla 3 veces, bloquea la IP (Anti-Fuerza Bruta).
-    Si coincide, genera un PIN numérico de 8 dígitos en memoria RAM, guarda SOLO su
-    hash criptográfico en la base de datos y envía el PIN por WhatsApp (Evolution API).
+    Primer ingreso de un ANCHOR/HOUSEHOLD precargado:
+    1. Confirma su DNI/CE contra el registrado por el Admin o su ANCHOR (comparación en tiempo constante).
+    2. Máximo `max_pin_sends_per_phone_per_day` envíos por número cada 24 h, aunque cambie la IP.
+    3. Genera un PIN de 8 dígitos en RAM (solo se guarda su hash) y lo envía por WhatsApp.
+    Los DNI incorrectos cuentan para el bloqueo de IP (3 fallos).
     """
     client_ip = get_client_ip(request)
     user_agent = get_user_agent(request)
-    norm_username = normalize_lot_id(payload.username)
-    actor_label = f"{villa_id}:{norm_username}"
+    phone = normalize_phone_username(payload.username) or ""
+    actor_label = f"{villa_id}:{phone}"
 
     blocked_report = await user_repo.is_ip_blocked(villa_id, client_ip)
     if blocked_report:
@@ -202,109 +161,87 @@ async def activate_lot_pin_via_whatsapp(
             ),
         )
 
-    memberships = await lot_repo.list_memberships_by_phone(villa_id, norm_username)
-    lot = await lot_repo.get_lot(villa_id, norm_username)
+    try:
+        provided_doc = normalize_document_id(payload.document_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
-    # Solo se permite la activación inicial: si la cuenta ya tiene PIN activo, cualquiera que
-    # conozca el número podría forzar resets de PIN repetidos (DoS). Debe ingresar con su PIN
-    # o pedir reseteo al Administrador.
-    existing_user = await user_repo.get_user(villa_id, norm_username)
+    existing_user = await user_repo.get_user(villa_id, phone)
     if existing_user and existing_user.last_login_at is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Esta cuenta ya tiene un PIN activo. Ingresa con tu PIN.",
         )
 
-    if memberships:
-        primary_mem = memberships[0]
-        expected_phone = normalize_peru_phone(primary_mem.phone)
-        target_lot_id = primary_mem.lot_id
-        owner_name = primary_mem.full_name
-        target_email = None
-    elif lot and lot.owner_phone:
-        expected_phone = normalize_peru_phone(lot.owner_phone)
-        target_lot_id = lot.lot_id
-        owner_name = lot.owner_name
-        target_email = lot.owner_email
-    else:
+    memberships = await lot_repo.list_memberships_by_phone(villa_id, phone)
+    if not memberships:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"El usuario o lote {norm_username} no tiene un número de WhatsApp registrado "
-                "en la Junta Directiva. Solicita al Administrador actualizar tu "
-                "teléfono en el padrón."
-            ),
+            detail="Este número no está registrado en el padrón de la Villa.",
         )
 
-    # El username ya es el celular: no se le vuelve a pedir el número al vecino.
-    raw_phone = payload.phone
-    if not (raw_phone and raw_phone.strip()) and norm_username.isdigit() and len(norm_username) == 9:
-        raw_phone = norm_username
-    provided_phone = normalize_peru_phone(raw_phone)
+    since = datetime.now(UTC) - timedelta(hours=24)
+    if await user_repo.count_pin_requests(villa_id, phone, since) >= settings.max_pin_sends_per_phone_per_day:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Ya enviamos tu PIN varias veces hoy. Revisa tu WhatsApp o inténtalo mañana.",
+        )
 
-    if not expected_phone or expected_phone != provided_phone:
+    registered_docs = {
+        normalize_doc(m.document_id) for m in memberships if m.document_id and normalize_doc(m.document_id)
+    }
+    if not registered_docs:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Aún no tienes un DNI registrado. Pide al Administrador o al titular de tu lote que lo registre.",
+        )
+
+    matches = any(hmac.compare_digest(provided_doc or "", d or "") for d in registered_docs)
+    if not matches:
+        await user_repo.record_pin_request(villa_id, phone, client_ip, ok=False)
         failure_report = await user_repo.record_login_failure(
             villa_id=villa_id,
-            attempted_username=norm_username,
+            attempted_username=phone,
             client_ip=client_ip,
             user_agent=user_agent,
         )
         log_audit_event(
-            event="AUTH_PHONE_ACTIVATION_FAILED",
+            event="AUTH_DOCUMENT_ACTIVATION_FAILED",
             actor=actor_label,
             client_ip=client_ip,
             user_agent=user_agent,
-            details={
-                "villa_id": villa_id,
-                "username": norm_username,
-                "attempt": failure_report.failed_attempts,
-            },
+            details={"villa_id": villa_id, "attempt": failure_report.failed_attempts},
         )
         if failure_report.is_blocked:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    f"Tu dirección IP ha sido bloqueada en {villa_id} tras 3 intentos fallidos "
-                    "al verificar el teléfono."
-                ),
+                detail=f"Tu dirección IP ha sido bloqueada en {villa_id} tras 3 intentos fallidos.",
             )
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"El número de WhatsApp no coincide con el registrado para {norm_username} "
-                f"(Intento {failure_report.failed_attempts} de {settings.max_failed_attempts_per_ip})."
+                "Los datos no coinciden con los registrados "
+                f"(intento {failure_report.failed_attempts} de {settings.max_failed_attempts_per_ip})."
             ),
         )
 
-    # Generación Just-In-Time en memoria RAM: jamás se almacena en texto plano
-    fresh_pin = generate_initial_lot_password()
-    pin_hash = hash_password(fresh_pin)
+    primary_mem = memberships[0]
+    target_lot_id = primary_mem.lot_id
+    owner_name = primary_mem.full_name
 
+    fresh_pin = generate_initial_lot_password()
     await user_repo.upsert_user_account(
         villa_id=villa_id,
-        username=norm_username,
-        password_hash=pin_hash,
+        username=phone,
+        password_hash=hash_password(fresh_pin),
         role=UserRole.RESIDENT,
         lot_id=target_lot_id,
         full_name=owner_name,
-        email=target_email,
+        document_id=provided_doc,
     )
 
-    # Si se activó por código de lote ('P21') y tiene owner_phone, sincronizar también el usuario telefónico
-    local_owner_phone = normalize_phone_username(expected_phone)
-    if local_owner_phone and local_owner_phone != norm_username:
-        await user_repo.upsert_user_account(
-            villa_id=villa_id,
-            username=local_owner_phone,
-            password_hash=pin_hash,
-            role=UserRole.RESIDENT,
-            lot_id=target_lot_id,
-            full_name=owner_name,
-            email=target_email,
-        )
-
     sent_ok, channel = await send_whatsapp_pin_notification(
-        phone=expected_phone,
+        phone=normalize_peru_phone(phone) or f"51{phone}",
         villa_id=villa_id,
         lot_id=target_lot_id,
         owner_name=owner_name,
@@ -315,28 +252,20 @@ async def activate_lot_pin_via_whatsapp(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"No se pudo despachar el mensaje de WhatsApp ({channel}).",
         )
+    await user_repo.record_pin_request(villa_id, phone, client_ip, ok=True)
 
     log_audit_event(
-        event="AUTH_LOT_PIN_ACTIVATED_VIA_WHATSAPP",
+        event="AUTH_PIN_ACTIVATED_VIA_WHATSAPP",
         actor=actor_label,
         client_ip=client_ip,
         user_agent=user_agent,
-        details={
-            "villa_id": villa_id,
-            "username": norm_username,
-            "lot_id": target_lot_id,
-            "channel": channel,
-        },
+        details={"villa_id": villa_id, "lot_id": target_lot_id, "channel": channel},
     )
-
     return ActivateLotPinResponse(
         villa_id=villa_id,
         lot_id=target_lot_id,
         delivery_channel=channel,
-        message=(
-            f"Hemos enviado tu PIN de 8 dígitos al WhatsApp registrado "
-            f"({norm_username} - Lote {target_lot_id})."
-        ),
+        message="Te enviamos tu PIN de 8 dígitos por WhatsApp.",
     )
 
 

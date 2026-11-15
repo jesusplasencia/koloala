@@ -429,7 +429,7 @@ async def test_two_step_login_lookup_and_just_in_time_whatsapp_pin(
         auth_module, "send_whatsapp_pin_notification", fake_send_whatsapp_pin
     )
 
-    # 1. El Admin carga el lote P21 con su celular en el padrón (aún nunca ha iniciado sesión)
+    # 1. El Admin carga el lote P21 con celular y DNI del titular (aún nunca ha iniciado sesión)
     await client.put(
         "/api/v1/lots/bulk",
         headers=admin_headers,
@@ -439,31 +439,33 @@ async def test_two_step_login_lookup_and_just_in_time_whatsapp_pin(
                     "lot_id": "P21",
                     "owner_name": "Familia Vargas",
                     "owner_phone": "987654321",
+                    "owner_document_id": "45891230",
                     "is_maintenance_up_to_date": True,
                 }
             ]
         },
     )
 
-    # 2. Paso 1 del vecino: escribe solo "P21" en /api/v1/auth/lookup
-    lookup_resp = await client.post("/api/v1/auth/lookup", json={"username": "P21"})
+    # 2. El vecino escribe su celular: se le pide DNI y NO se revela su nombre ni lotes
+    lookup_resp = await client.post("/api/v1/auth/lookup", json={"username": "987 654 321"})
     assert lookup_resp.status_code == 200
     lookup_data = lookup_resp.json()
-    assert lookup_data["status"] == "NEEDS_PHONE_ACTIVATION"
-    assert "masked_phone_hint" not in lookup_data  # no se filtran dígitos del teléfono
-    assert lookup_data["owner_name"] == "Familia Vargas"
+    assert lookup_data["status"] == "NEEDS_DOCUMENT"
+    assert "owner_name" not in lookup_data and "available_lots" not in lookup_data
+    assert "Vargas" not in lookup_resp.text
 
-    # 3. Si alguien ingresa un celular incorrecto, falla con 401
-    wrong_phone = await client.post(
+    # 3. Un DNI incorrecto no envía nada (400) y cuenta para el radar de IP
+    wrong_doc = await client.post(
         "/api/v1/auth/activate-pin",
-        json={"username": "P21", "phone": "900000000"},
+        json={"username": "987654321", "document_id": "11111111"},
     )
-    assert wrong_phone.status_code == 401
+    assert wrong_doc.status_code == 400
+    assert captured_pins == {}
 
-    # 4. El vecino confirma su celular real -> se genera el PIN Just-In-Time en RAM y sale por WhatsApp
+    # 4. Con su DNI real se genera el PIN en RAM y sale por WhatsApp
     act_resp = await client.post(
         "/api/v1/auth/activate-pin",
-        json={"username": "P21", "phone": "987 654 321"},
+        json={"username": "987654321", "document_id": "45891230"},
     )
     assert act_resp.status_code == 200
     sent_pin = captured_pins.get("VC3:P21:51987654321")
@@ -473,13 +475,18 @@ async def test_two_step_login_lookup_and_just_in_time_whatsapp_pin(
     # 5. El vecino ingresa con el PIN recibido en su WhatsApp
     login_resp = await client.post(
         "/api/v1/auth/login",
-        json={"username": "P21", "password": sent_pin},
+        json={"username": "987654321", "password": sent_pin},
     )
     assert login_resp.status_code == 200
 
-    # 6. A partir de ahora (last_login_at != None), /lookup ya va directo a READY_FOR_PASSWORD
-    second_lookup = await client.post("/api/v1/auth/lookup", json={"username": "P21"})
+    # 6. A partir de ahora /lookup va directo a READY_FOR_PASSWORD y ya no se puede re-enviar PIN
+    second_lookup = await client.post("/api/v1/auth/lookup", json={"username": "987654321"})
     assert second_lookup.json()["status"] == "READY_FOR_PASSWORD"
+    replay = await client.post(
+        "/api/v1/auth/activate-pin",
+        json={"username": "987654321", "document_id": "45891230"},
+    )
+    assert replay.status_code == 409
 
 
 # ---------------------------------------------------------------------------
@@ -604,20 +611,19 @@ async def test_anchor_adds_household_angel_plasencia_and_caillou_qr_traceability
     assert mem_data["full_name"] == "Angel Plasencia"
     assert mem_data["membership_role"] == "HOUSEHOLD"
 
-    # 3. Angel Plasencia (980180219) entra por primera vez -> lookup detecta NEEDS_PHONE_ACTIVATION
+    # 3. Angel Plasencia (980180219) entra por primera vez -> lookup pide su DNI (NEEDS_DOCUMENT)
     angel_lookup = await client.post(
         "/api/v1/auth/lookup",
-        json={"username": "980180219"},
+        json={"username": "980180219", "document_id": "71234567"},
     )
     assert angel_lookup.status_code == 200
-    assert angel_lookup.json()["status"] == "NEEDS_PHONE_ACTIVATION"
-    assert angel_lookup.json()["membership_role"] == "HOUSEHOLD"
-    assert angel_lookup.json()["available_lots"] == ["P20"]
+    assert angel_lookup.json()["status"] == "NEEDS_DOCUMENT"
+    assert "Angel" not in angel_lookup.text
 
     # 4. Angel activa su PIN por WhatsApp sin re-escribir su celular (el username ya es el número)
     angel_act = await client.post(
         "/api/v1/auth/activate-pin",
-        json={"username": "980180219"},
+        json={"username": "980180219", "document_id": "71234567"},
     )
     assert angel_act.status_code == 200
     angel_pin = captured_pins["51980180219"]
@@ -710,7 +716,7 @@ async def test_anchor_adds_household_angel_plasencia_and_caillou_qr_traceability
     # 9. Angel ya activó su PIN: nadie puede forzar un nuevo reset por /activate-pin (anti-DoS)
     replay = await client.post(
         "/api/v1/auth/activate-pin",
-        json={"username": "980180219"},
+        json={"username": "980180219", "document_id": "71234567"},
     )
     assert replay.status_code == 409
 
@@ -768,18 +774,21 @@ async def test_3nf_multi_lot_and_cross_role_pepito_and_pepita(
                     "lot_id": "P20",
                     "owner_name": "Pepito Juarez",
                     "owner_phone": "911222333",
+                    "owner_document_id": "40111222",
                     "is_maintenance_up_to_date": True,
                 },
                 {
                     "lot_id": "Q02",
                     "owner_name": "Pepito Juarez",
                     "owner_phone": "911222333",
+                    "owner_document_id": "40111222",
                     "is_maintenance_up_to_date": True,
                 },
                 {
                     "lot_id": "Q03",
                     "owner_name": "Pepita Reina",
                     "owner_phone": "944555666",
+                    "owner_document_id": "40333444",
                     "is_maintenance_up_to_date": True,
                 },
             ]
@@ -789,7 +798,7 @@ async def test_3nf_multi_lot_and_cross_role_pepito_and_pepita(
     # 2. Pepito activa su único PIN e inicia sesión -> ve sus 2 lotes [P20, Q02]
     await client.post(
         "/api/v1/auth/activate-pin",
-        json={"username": "911222333", "phone": "911222333"},
+        json={"username": "911222333", "document_id": "40111222"},
     )
     pepito_login = await client.post(
         "/api/v1/auth/login",
@@ -805,7 +814,7 @@ async def test_3nf_multi_lot_and_cross_role_pepito_and_pepita(
     add_pepita = await client.post(
         "/api/v1/lots/P20/members",
         headers=pepito_headers,
-        json={"phone": "944555666", "full_name": "Pepita Reina"},
+        json={"phone": "944555666", "full_name": "Pepita Reina", "document_id": "40333444"},
     )
     assert add_pepita.status_code == 201
     assert add_pepita.json()["membership_role"] == "HOUSEHOLD"
@@ -813,7 +822,7 @@ async def test_3nf_multi_lot_and_cross_role_pepito_and_pepita(
     # 3. Pepita Reina activa su PIN e inicia sesión -> es ANCHOR en Q03 y HOUSEHOLD en P20
     await client.post(
         "/api/v1/auth/activate-pin",
-        json={"username": "944555666", "phone": "944555666"},
+        json={"username": "944555666", "document_id": "40333444"},
     )
     pepita_login = await client.post(
         "/api/v1/auth/login",
@@ -872,7 +881,7 @@ async def test_unknown_number_gets_no_account_and_no_visitor_registration(
     assert lookup.status_code == 200
     data = lookup.json()
     assert data["status"] == "UNREGISTERED_NO_ACCOUNT"
-    assert data["role"] is None
+    assert "role" not in data and "owner_name" not in data
     assert "QR" in data["message"]
     assert "916220518" not in lookup.text and "934253226" not in lookup.text
 
@@ -927,6 +936,7 @@ async def test_single_global_phone_password_across_multiple_villas(
                     "lot_id": "P20",
                     "owner_name": "Pepito MultiVilla",
                     "owner_phone": "977888999",
+                    "owner_document_id": "40555666",
                     "is_maintenance_up_to_date": True,
                 }
             ]
@@ -941,6 +951,7 @@ async def test_single_global_phone_password_across_multiple_villas(
                     "lot_id": "M20",
                     "owner_name": "Pepito MultiVilla",
                     "owner_phone": "977888999",
+                    "owner_document_id": "40555666",
                     "is_maintenance_up_to_date": True,
                 }
             ]
@@ -950,7 +961,7 @@ async def test_single_global_phone_password_across_multiple_villas(
     # Pepito activa su PIN una sola vez en VC3
     await client.post(
         "/api/v1/auth/activate-pin",
-        json={"username": "977888999", "phone": "977888999"},
+        json={"username": "977888999", "document_id": "40555666"},
     )
     single_pin = captured_pins["51977888999"]
 

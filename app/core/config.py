@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 43200  # 30 días (43,200 minutos)
     max_failed_attempts_per_ip: int = 3
+    max_pin_sends_per_phone_per_day: int = 3
 
     # Base de Datos PostgreSQL (SQLAlchemy 2.0 Async + Separación de Roles Least-Privilege)
     # - use_postgres=False usa InMemory en desarrollo rápido y pytest unitarios sin Docker.

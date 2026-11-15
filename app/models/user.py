@@ -132,34 +132,33 @@ class UserLookupRequest(BaseModel):
 
 class UserLookupStatus(StrEnum):
     READY_FOR_PASSWORD = "READY_FOR_PASSWORD"
-    NEEDS_PHONE_ACTIVATION = "NEEDS_PHONE_ACTIVATION"
+    NEEDS_DOCUMENT = "NEEDS_DOCUMENT"
     UNREGISTERED_NO_ACCOUNT = "UNREGISTERED_NO_ACCOUNT"
 
 
 class UserLookupResponse(BaseModel):
+    """Antes de autenticar NO se exponen nombre, rol ni lotes (evita enumerar vecinos)."""
+
     villa_id: str
     username: str
     status: UserLookupStatus
-    owner_name: str | None = None
-    role: UserRole | None = None
-    membership_role: MembershipRole | None = None
-    available_lots: list[str] = Field(default_factory=list)
     message: str | None = None
 
 
 class ActivateLotPinRequest(BaseModel):
     username: str = Field(
         ...,
-        min_length=2,
-        max_length=30,
-        examples=["980180219", "P21"],
-        description="Número de celular o lote a activar por primera vez",
-    )
-    phone: str | None = Field(
-        default=None,
-        max_length=30,
+        min_length=9,
+        max_length=20,
         examples=["980180219"],
-        description="Opcional: si el username ya es el celular de 9 dígitos, se usa ese mismo número",
+        description="Celular de 9 dígitos que activa su cuenta por primera vez",
+    )
+    document_id: str = Field(
+        ...,
+        min_length=8,
+        max_length=15,
+        examples=["71234567"],
+        description="DNI o Carnet de Extranjería registrado por el Administrador o el ANCHOR",
     )
 
 

@@ -20,6 +20,19 @@ def normalize_doc(raw: str | None) -> str | None:
     return cleaned or None
 
 
+_DOC_ID_RE = re.compile(r"^(\d{8}|[A-Z0-9]{9,12})$")
+
+
+def normalize_document_id(raw: str | None) -> str | None:
+    """DNI (8 dígitos) o Carnet de Extranjería (9 a 12 alfanuméricos), sin espacios ni guiones."""
+    doc = normalize_doc(raw)
+    if doc is None:
+        return None
+    if not _DOC_ID_RE.fullmatch(doc):
+        raise ValueError("Ingresa un DNI de 8 dígitos o un Carnet de Extranjería de 9 a 12 caracteres.")
+    return doc
+
+
 def normalize_plate(raw: str | None) -> str | None:
     if not raw:
         return None

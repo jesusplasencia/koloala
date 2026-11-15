@@ -17,6 +17,7 @@ from app.models.lot import (
     PaginatedLotsResponse,
     PropertyLot,
     UpdateLotMaintenanceRequest,
+    UpdateMemberRequest,
 )
 from app.repositories.lots_repo import in_memory_lot_repo
 from app.repositories.users_repo import in_memory_user_repo
@@ -227,4 +228,22 @@ async def remove_lot_household_member(
         identity=identity,
         client_ip=get_client_ip(request),
         user_agent=get_user_agent(request),
+    )
+
+
+@router.patch("/{lot_id}/members/{member_phone}", response_model=LotMembership)
+async def update_lot_member(
+    lot_id: str,
+    member_phone: str,
+    payload: UpdateMemberRequest,
+    admin: AdminDep,
+    service: LotsServiceDep,
+) -> LotMembership:
+    """[SOLO ADMIN] Corrige el nombre o el DNI/CE de un integrante (se le pide al activar su cuenta)."""
+    return await service.update_lot_member(
+        villa_id=admin.villa_id,
+        lot_id=lot_id,
+        member_phone=member_phone,
+        payload=payload,
+        identity=admin,
     )

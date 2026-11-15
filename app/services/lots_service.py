@@ -4,6 +4,7 @@ from fastapi import HTTPException, status
 
 from app.core.audit import log_audit_event
 from app.core.config import settings
+from app.core.pii import normalize_document_id
 from app.core.security import (
     AuthenticatedIdentity,
     generate_initial_lot_password,
@@ -18,6 +19,7 @@ from app.models.lot import (
     PaginatedLotsResponse,
     PropertyLot,
     UpdateLotMaintenanceRequest,
+    UpdateMemberRequest,
     build_whatsapp_onboarding_url,
     normalize_lot_id,
     normalize_phone_username,
@@ -409,7 +411,15 @@ class LotsService:
                         ),
                     )
 
-        cleaned_doc = payload.document_id.strip().upper() if payload.document_id else None
+        try:
+            cleaned_doc = normalize_document_id(payload.document_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        if not cleaned_doc and identity.role not in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="El DNI o Carnet de Extranjería del integrante es obligatorio: se le pedirá al activar su cuenta.",
+            )
         membership = await self.repo.upsert_membership(
             villa_id=norm_villa,
             lot_id=norm_lot,
@@ -491,3 +501,43 @@ class LotsService:
             },
         )
         return deactivated
+
+    async def update_lot_member(
+        self,
+        villa_id: str,
+        lot_id: str,
+        member_phone: str,
+        payload: UpdateMemberRequest,
+        identity: AuthenticatedIdentity,
+    ) -> LotMembership:
+        """[SOLO ADMIN] Corrige el nombre o el DNI de un integrante (sin DELETE, vía UPDATE)."""
+        if identity.role not in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo el Administrador puede corregir datos.")
+        norm_villa = normalize_villa_id(villa_id)
+        norm_lot = normalize_lot_id(lot_id)
+        norm_phone = normalize_phone_username(member_phone) or member_phone.strip()
+        current = await self.repo.get_membership(norm_villa, norm_lot, norm_phone)
+        if not current:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="El integrante no está activo en ese lote.")
+        try:
+            doc = normalize_document_id(payload.document_id) if payload.document_id else None
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        updated = await self.repo.upsert_membership(
+            villa_id=norm_villa,
+            lot_id=norm_lot,
+            phone=norm_phone,
+            full_name=(payload.full_name or current.full_name).strip(),
+            membership_role=current.membership_role,
+            added_by=current.added_by,
+            document_id=doc,
+            is_active=True,
+        )
+        log_audit_event(
+            event="LOT_MEMBER_UPDATED",
+            actor=f"{norm_villa}:{identity.username}",
+            client_ip="internal",
+            user_agent="api",
+            details={"villa_id": norm_villa, "lot_id": norm_lot, "document_updated": bool(doc)},
+        )
+        return updated

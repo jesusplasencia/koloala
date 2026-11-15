@@ -131,7 +131,7 @@ async def test_household_cap_per_lot(client: AsyncClient, monkeypatch):
     codes = []
     for i in range(3):
         r = await client.post(f"{API}/lots/B14/members", headers=owner,
-                              json={"phone": f"98000000{i}", "full_name": f"Familiar {i}"})
+                              json={"phone": f"98000000{i}", "full_name": f"Familiar {i}", "document_id": f"7000000{i}"})
         codes.append(r.status_code)
     assert codes[:2] == [codes[0], codes[0]] and codes[0] in (200, 201)
     assert codes[2] == 409

@@ -264,6 +264,7 @@ class InMemoryLotRepository:
                     full_name=target_lot.owner_name,
                     membership_role=MembershipRole.ANCHOR,
                     added_by="ADMIN",
+                    document_id=item.owner_document_id,
                 )
 
         return created_count, updated_count, processed, newly_created_lots

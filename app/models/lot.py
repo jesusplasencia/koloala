@@ -232,10 +232,9 @@ class AddHouseholdMemberRequest(BaseModel):
     )
     document_id: str | None = Field(
         default=None,
-        min_length=8,
         max_length=15,
         examples=["71234567"],
-        description="Opcional: DNI (8 dígitos) o Carnet de Extranjería",
+        description="DNI o CE del integrante. Obligatorio cuando lo agrega un ANCHOR (se le pedirá al activar).",
     )
     membership_role: MembershipRole = Field(
         default=MembershipRole.HOUSEHOLD,
@@ -244,6 +243,11 @@ class AddHouseholdMemberRequest(BaseModel):
 
 
 # --- Contratos HTTP (Request / Response) para el Administrador de cada Villa ---
+class UpdateMemberRequest(BaseModel):
+    full_name: str | None = Field(default=None, min_length=2, max_length=100)
+    document_id: str | None = Field(default=None, max_length=15, examples=["71234567"])
+
+
 class UpdateLotMaintenanceRequest(BaseModel):
     is_maintenance_up_to_date: bool = Field(
         ..., description="True si pagó su cuota del mes, False si entró en mora"
@@ -292,12 +296,25 @@ class BulkLotItem(BaseModel):
         examples=["vecino.p20@gmail.com"],
         description="Opcional: correo electrónico del propietario",
     )
+    owner_document_id: str | None = Field(
+        default=None,
+        max_length=15,
+        examples=["71234567"],
+        description="DNI o CE del titular: se le pedirá al activar su cuenta por primera vez",
+    )
     is_maintenance_up_to_date: bool
 
     @field_validator("lot_id", mode="before")
     @classmethod
     def _validate_lot_id(cls, value: str) -> str:
         return normalize_lot_id(value)
+
+    @field_validator("owner_document_id", mode="before")
+    @classmethod
+    def _validate_doc(cls, value: str | None) -> str | None:
+        from app.core.pii import normalize_document_id
+
+        return normalize_document_id(value) if value else None
 
 
 class BulkUpsertLotsRequest(BaseModel):

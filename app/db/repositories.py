@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.core.security import hash_password
 from app.db.models import (
     IPSecurityRecordORM,
+    PinRequestORM,
     LotMembershipORM,
     PropertyLotORM,
     UserORM,
@@ -193,6 +194,7 @@ class PostgresLotRepository:
                     full_name=domain_lot.owner_name,
                     membership_role=MembershipRole.ANCHOR,
                     added_by="ADMIN",
+                    document_id=item.owner_document_id,
                 )
 
         await self.session.flush()
@@ -718,3 +720,24 @@ class PostgresUserRepository:
         ip_row.blocked_at = None
         await self.session.flush()
         return True
+
+    async def record_pin_request(self, villa_id: str, phone: str, client_ip: str, ok: bool) -> None:
+        self.session.add(
+            PinRequestORM(
+                villa_id=normalize_villa_id(villa_id),
+                phone=phone,
+                client_ip=client_ip,
+                ok=ok,
+                requested_at=datetime.now(UTC),
+            )
+        )
+        await self.session.flush()
+
+    async def count_pin_requests(self, villa_id: str, phone: str, since: datetime) -> int:
+        stmt = select(func.count()).select_from(PinRequestORM).where(
+            PinRequestORM.villa_id == normalize_villa_id(villa_id),
+            PinRequestORM.phone == phone,
+            PinRequestORM.ok.is_(True),
+            PinRequestORM.requested_at >= since,
+        )
+        return int((await self.session.execute(stmt)).scalar() or 0)
