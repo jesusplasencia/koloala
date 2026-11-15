@@ -4,7 +4,7 @@ Cuentas para probar los 3 roles:
 1. 916220518  Jesús Plasencia          -> SUPER_ADMIN (oficial) y ANCHOR de VC3-P20
 2. 934253226  Administrador VC3        -> ADMIN de VC3 (oficial)
 3. 900000001  Vigilante de Prueba      -> GUARD de VC3 (número FICTICIO, solo para pruebas)
-Además: Angel Plasencia (980180219) como HOUSEHOLD de P20 y el catálogo ML/CA.
+Además: el lote P20 y el catálogo ML/CA. Los familiares se agregan desde la app (siempre con DNI).
 
 Los PIN se generan al crear la persona y se imprimen SOLO en esta consola.
 Re-ejecutar el seed no cambia contraseñas ni datos ya existentes.
@@ -82,14 +82,12 @@ async def seed() -> None:
         jesus, jesus_pin = await _person(session, "916220518", "Jesus Plasencia", super_admin=True)
         admin, admin_pin = await _person(session, "934253226", "Administrador Villa Club 3")
         guard, guard_pin = await _person(session, "900000001", "Vigilante de Prueba")
-        angel, angel_pin = await _person(session, "980180219", "Angel Plasencia", with_pin=False)
 
         await _staff(session, admin, "ADMIN")
         await _staff(session, guard, "GUARD")
 
         await _lot(session, "P20")
         await _membership(session, "P20", jesus, "ANCHOR")
-        await _membership(session, "P20", angel, "HOUSEHOLD", added_by=jesus)
 
         for code, name, lot_type in (
             ("ML01", "Panadería", "MINI_LOT"),
@@ -107,7 +105,6 @@ async def seed() -> None:
     print(f"SUPER_ADMIN + ANCHOR P20 -> 916220518 Jesús Plasencia   | {jesus_pin}")
     print(f"ADMIN VC3               -> 934253226 Administrador VC3  | {admin_pin}")
     print(f"GUARD VC3 (ficticio)    -> 900000001 Vigilante de Prueba | {guard_pin}")
-    print(f"HOUSEHOLD P20           -> 980180219 Angel Plasencia    | {angel_pin}")
     print("Catálogo: ML01 Panadería, ML02 Botica, CA01 Canchita de Fútbol 1, CA02 Parque 1")
     print("=" * 72 + "\n")
 
