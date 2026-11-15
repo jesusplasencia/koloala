@@ -133,7 +133,7 @@ class PostgresLotRepository:
                 created += 1
             await self.session.flush()
             if item.owner_phone:
-                person = await self.people.upsert_person(item.owner_phone, item.owner_name, item.owner_document_id, overwrite=True)
+                person = await self.people.upsert_person(item.owner_phone, item.owner_name, item.owner_document_id, overwrite=False)
                 await self.upsert_membership(norm, key[1], person.id, MembershipRole.ANCHOR)
             processed.append(lot_to_domain(row, await self._owner(*key)))
         return created, updated, processed

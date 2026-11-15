@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     resident_qr_secret: str = "vc-koloala-resident-qr-secret-change-in-production-2026"
     resident_qr_window_seconds: int = 30
     max_household_per_lot: int = 12
+    # Solo para el seed de desarrollo: DNI real del Super Admin (va en .env, nunca en el código)
+    seed_super_admin_dni: str | None = None
 
     # Autenticación JWT y Seguridad Anti-Fuerza Bruta / Password Spraying
     jwt_secret_key: str = "vc3-koloala-super-secret-jwt-key-change-in-production-2026"

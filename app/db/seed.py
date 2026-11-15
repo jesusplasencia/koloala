@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
+from app.core.config import settings
+from app.core.pii import normalize_document_id
 from app.core.security import generate_initial_lot_password, hash_password
 from app.db.models import LotMembershipORM, PersonORM, PropertyLotORM, StaffRoleORM
 from app.db.session import AsyncSessionLocal
@@ -42,6 +44,17 @@ async def _person(session, phone: str, name: str, *, super_admin: bool = False, 
     session.add(row)
     await session.flush()
     return row, (f"PIN {pin}" if pin else "sin PIN: activa con su DNI cuando el admin lo registre")
+
+
+def _fill_dni(person: PersonORM, dni: str | None) -> str:
+    """Completa el DNI solo si está vacío (nunca reemplaza uno existente ni toca el PIN)."""
+    if person.document_id:
+        return "DNI ya registrado"
+    if not dni:
+        return "SIN DNI (define SEED_SUPER_ADMIN_DNI en tu .env y vuelve a correr el seed)"
+    person.document_id = normalize_document_id(dni)
+    person.updated_at = datetime.now(UTC)
+    return "DNI registrado"
 
 
 async def _staff(session, person: PersonORM, role: str) -> None:
@@ -82,6 +95,9 @@ async def seed() -> None:
         jesus, jesus_pin = await _person(session, "916220518", "Jesus Plasencia", super_admin=True)
         admin, admin_pin = await _person(session, "934253226", "Administrador Villa Club 3")
         guard, guard_pin = await _person(session, "900000001", "Vigilante de Prueba")
+        jesus_dni = _fill_dni(jesus, settings.seed_super_admin_dni)
+        admin_dni = _fill_dni(admin, "40000001")  # ficticio
+        guard_dni = _fill_dni(guard, "40000003")  # ficticio
 
         await _staff(session, admin, "ADMIN")
         await _staff(session, guard, "GUARD")
@@ -102,9 +118,9 @@ async def seed() -> None:
     print("\n" + "=" * 72)
     print(f"[OK] SEED {VILLA} (people + staff_roles + lot_memberships)")
     print("=" * 72)
-    print(f"SUPER_ADMIN + ANCHOR P20 -> 916220518 Jesús Plasencia   | {jesus_pin}")
-    print(f"ADMIN VC3               -> 934253226 Administrador VC3  | {admin_pin}")
-    print(f"GUARD VC3 (ficticio)    -> 900000001 Vigilante de Prueba | {guard_pin}")
+    print(f"SUPER_ADMIN + ANCHOR P20 -> 916220518 Jesús Plasencia   | {jesus_pin} | {jesus_dni}")
+    print(f"ADMIN VC3               -> 934253226 Administrador VC3  | {admin_pin} | {admin_dni}")
+    print(f"GUARD VC3 (ficticio)    -> 900000001 Vigilante de Prueba | {guard_pin} | {guard_dni}")
     print("Catálogo: ML01 Panadería, ML02 Botica, CA01 Canchita de Fútbol 1, CA02 Parque 1")
     print("=" * 72 + "\n")
 

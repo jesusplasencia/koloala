@@ -101,7 +101,7 @@ async def test_name_lives_in_one_place(client, h):
         headers=h.admin,
         json={"lots": [
             {"lot_id": "Q02", "owner_name": "Pepito Juarez", "owner_phone": "911222333", "owner_document_id": "40111222", "is_maintenance_up_to_date": True},
-            {"lot_id": "Q03", "owner_name": "Pepito Juarez", "owner_phone": "911222333", "is_maintenance_up_to_date": True},
+            {"lot_id": "Q03", "owner_name": "Pepito Juarez", "owner_phone": "911222333", "owner_document_id": "40111222", "is_maintenance_up_to_date": True},
         ]},
     )
     renamed = await client.patch(
@@ -118,14 +118,14 @@ async def test_lots_pagination_and_filtering(client, h):
         f"{API}/lots/bulk",
         headers=h.admin,
         json={"lots": [
-            {"lot_id": "A01", "is_maintenance_up_to_date": True},
-            {"lot_id": "P20", "is_maintenance_up_to_date": True},
-            {"lot_id": "U28", "is_maintenance_up_to_date": False},
+            {"lot_id": "A01", "owner_name": "Fam A01", "owner_phone": "955300001", "owner_document_id": "40300001", "is_maintenance_up_to_date": True},
+            {"lot_id": "P20", "owner_name": "Fam P20", "owner_phone": "955300002", "owner_document_id": "40300002", "is_maintenance_up_to_date": True},
+            {"lot_id": "U28", "owner_name": "Fam U28", "owner_phone": "955300003", "owner_document_id": "40300003", "is_maintenance_up_to_date": False},
         ]},
     )
     body = (await client.get(f"{API}/lots", headers=h.admin)).json()
     assert body["total"] == 5 and [i["lot_id"] for i in body["items"]] == ["A01", "B14", "F08", "P20", "U28"]
-    assert [i["owner_name"] for i in body["items"]][:3] == [None, "Jesus Plasencia", "Vecino Moroso"]
+    assert [i["owner_name"] for i in body["items"]][:3] == ["Fam A01", "Jesus Plasencia", "Vecino Moroso"]
     page2 = (await client.get(f"{API}/lots?page=2&limit=2", headers=h.admin)).json()
     assert [x["lot_id"] for x in page2["items"]] == ["U28"] and page2["has_next"] is False
     delinquents = (await client.get(f"{API}/lots?is_maintenance_up_to_date=false", headers=h.admin)).json()
@@ -194,7 +194,7 @@ async def test_multi_lot_person_one_pin_two_villas(client, h, world, pins):
     await client.put(f"{API}/lots/bulk", headers=h.admin, json={"lots": [
         {"lot_id": "P30", "owner_name": "Pepito MultiVilla", "owner_phone": "977888999", "owner_document_id": "40555666", "is_maintenance_up_to_date": True}]})
     await client.put(f"{API}/lots/bulk", headers={**jesus_vc2, "X-Villa-Id": "VC2"}, json={"lots": [
-        {"lot_id": "M20", "owner_name": "Pepito MultiVilla", "owner_phone": "977888999", "is_maintenance_up_to_date": True}]})
+        {"lot_id": "M20", "owner_name": "Pepito MultiVilla", "owner_phone": "977888999", "owner_document_id": "40555666", "is_maintenance_up_to_date": True}]})
     assert (await _activate(client, "977888999", "40555666")).status_code == 200
     pin = pins["51977888999"]
     vc3 = await _login(client, "977888999", pin, villa="VC3")
@@ -253,8 +253,8 @@ async def test_staff_management(client, h, world, pins):
     assert login.json()["role"] == "GUARD"
 
     # Un ADMIN no puede nombrar administradores; el SUPER_ADMIN sí
-    assert (await client.post(f"{API}/admin/staff", headers=h.admin, json={"phone": "955000200", "full_name": "Otro Admin", "role": "ADMIN"})).status_code == 403
-    assert (await client.post(f"{API}/admin/staff", headers=h.jesus, json={"phone": "955000200", "full_name": "Otro Admin", "role": "ADMIN"})).status_code == 201
+    assert (await client.post(f"{API}/admin/staff", headers=h.admin, json={"phone": "955000200", "full_name": "Otro Admin", "document_id": "40000200", "role": "ADMIN"})).status_code == 403
+    assert (await client.post(f"{API}/admin/staff", headers=h.jesus, json={"phone": "955000200", "full_name": "Otro Admin", "document_id": "40000200", "role": "ADMIN"})).status_code == 201
 
     gone = await client.delete(f"{API}/admin/staff/955000100", headers=h.admin)
     assert gone.status_code == 200 and gone.json()["is_active"] is False
@@ -293,3 +293,52 @@ def test_audit_gz_rotation_cleanup_and_s3_deletion(tmp_path, monkeypatch: pytest
 
 
 _ = (ASGITransport, AsyncClient, app, MembershipRole)
+
+
+async def test_bulk_processes_valid_rows_and_reports_bad_ones(client, h, world):
+    world.people.ensure_person("955400009", "Ya Registrado", "40400009")
+    rows = [
+        {"row_number": 2, "lot_id": "R01", "owner_name": "Fam Uno", "owner_phone": "955400001", "owner_document_id": "40400001"},
+        {"row_number": 3, "lot_id": "R02", "owner_name": "Fam Dos", "owner_phone": "955400002", "owner_document_id": ""},
+        {"row_number": 4, "lot_id": "R03", "owner_name": "Fam Tres", "owner_phone": "95540003", "owner_document_id": "40400003"},
+        {"row_number": 5, "lot_id": "R04", "owner_name": "Fam Cuatro", "owner_phone": "955400004", "owner_document_id": "4040ABCD"},
+        {"row_number": 6, "lot_id": "R01", "owner_name": "Fam Repetida", "owner_phone": "955400005", "owner_document_id": "40400005"},
+        {"row_number": 7, "lot_id": "R06", "owner_name": "Otro Dni", "owner_phone": "955400009", "owner_document_id": "40499999"},
+        {"row_number": 8, "lot_id": "R07", "owner_name": "", "owner_phone": "955400007", "owner_document_id": "40400007"},
+        {"row_number": 9, "lot_id": "R08", "owner_name": "Fam Ocho", "owner_phone": "955 400 008", "owner_document_id": "4040-0008"},
+    ]
+    r = await client.put(f"{API}/lots/bulk", headers=h.admin, json={"lots": rows})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["processed_count"] == 2 and body["created_count"] == 2 and body["rejected_count"] == 6
+    reasons = {x["row_number"]: x["reason"] for x in body["rejected"]}
+    assert "DNI" in reasons[3] and "9 dígitos" in reasons[4] and "inválido" in reasons[5]
+    assert "repetido" in reasons[6] and "otro DNI registrado" in reasons[7] and "nombre" in reasons[8]
+    assert all(x["phone"] is None or x["phone"].startswith("*****") for x in body["rejected"])
+    assert "955400002" not in r.text  # los celulares rechazados salen enmascarados
+    # Las filas buenas sí quedaron: la persona existe con su DNI
+    assert (await world.people.get_by_phone("955400008")).document_id == "40400008"
+
+
+async def test_dni_required_for_admin_member_and_staff(client, h):
+    no_doc = await client.post(f"{API}/lots/B14/members", headers=h.admin, json={"phone": "955500001", "full_name": "Sin Dni"})
+    assert no_doc.status_code == 422 and "obligatorio" in no_doc.json()["detail"]
+    staff = await client.post(f"{API}/admin/staff", headers=h.admin, json={"phone": "955500002", "full_name": "Vigilante", "role": "GUARD"})
+    assert staff.status_code == 422 and "obligatorio" in staff.json()["detail"]
+
+
+async def test_dummy_csv_16_ok_4_rejected(client, h):
+    import csv
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "app" / "db" / "sql" / "dummy_padron.csv"
+    rows = []
+    with path.open(encoding="utf-8") as f:
+        for i, r in enumerate(csv.DictReader(f), start=2):
+            rows.append({
+                "row_number": i, "lot_id": r["lote"], "owner_name": r["propietario"], "owner_phone": r["telefono"],
+                "owner_document_id": r["dni"], "is_maintenance_up_to_date": r["aldia"] == "true",
+            })
+    body = (await client.put(f"{API}/lots/bulk", headers=h.admin, json={"lots": rows})).json()
+    assert body["processed_count"] == 16 and body["rejected_count"] == 4
+    assert sorted(x["lot_id"] for x in body["rejected"]) == ["Z05", "Z09", "Z13", "Z17"]

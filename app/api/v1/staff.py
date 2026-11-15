@@ -42,6 +42,11 @@ async def add_staff(payload: CreateStaffRequest, admin: AdminDep, people: People
         doc = normalize_document_id(payload.document_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="El DNI o Carnet de Extranjería es obligatorio: se le pedirá al activar su cuenta.",
+        )
     person = await people.upsert_person(phone, payload.full_name.strip(), doc, overwrite=True)
     role = await people.upsert_staff_role(admin.villa_id, person.id, payload.role, is_active=True)
     log_audit_event(

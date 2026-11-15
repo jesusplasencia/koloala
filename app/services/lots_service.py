@@ -10,6 +10,8 @@ from app.core.pii import mask_doc, normalize_document_id
 from app.core.security import AuthenticatedIdentity
 from app.models.lot import (
     AddHouseholdMemberRequest,
+    BulkLotItem,
+    BulkRejectedRow,
     BulkUpsertLotsRequest,
     BulkUpsertLotsResponse,
     LotMembership,
@@ -114,21 +116,96 @@ class LotsService:
         client_ip: str = "internal",
         user_agent: str = "unknown",
     ) -> BulkUpsertLotsResponse:
-        """Crea/actualiza lotes y, si traen celular, la PERSONA titular (nombre, DNI) y su membresía ANCHOR."""
+        """
+        Carga del padrón tolerante a errores: valida FILA POR FILA (lote, propietario, celular y DNI
+        obligatorios). Las filas válidas se procesan; las inválidas se devuelven en `rejected` con su
+        número de fila y el motivo, sin tumbar la carga completa.
+        """
         norm = normalize_villa_id(villa_id)
+        valid: list[BulkLotItem] = []
+        rejected: list[BulkRejectedRow] = []
+        seen_lots: dict[str, int | None] = {}
+        seen_phones: dict[str, str] = {}
+
+        def reject(item: BulkLotItem, reason: str, phone: str | None = None) -> None:
+            raw_phone = phone or (normalize_phone_username(item.owner_phone) if item.owner_phone else None)
+            rejected.append(
+                BulkRejectedRow(
+                    row_number=item.row_number,
+                    lot_id=(item.lot_id or "").strip().upper() or None,
+                    phone=f"*****{raw_phone[-4:]}" if raw_phone and len(raw_phone) >= 4 else None,
+                    reason=reason,
+                )
+            )
+
         for item in payload.lots:
-            if item.owner_phone:
-                _clean_phone(item.owner_phone)
-        created, updated, processed = await self.repo.upsert_bulk_lots(norm, payload.lots)
+            lot_id = normalize_lot_id(item.lot_id or "")
+            name = " ".join((item.owner_name or "").split())
+            phone = normalize_phone_username(item.owner_phone) or ""
+            if not (2 <= len(lot_id) <= 10):
+                reject(item, "Falta el lote o es inválido (2 a 10 caracteres).")
+                continue
+            if len(name) < 2:
+                reject(item, "Falta el nombre del propietario.")
+                continue
+            if not (phone.isdigit() and len(phone) == 9):
+                reject(item, "Falta el celular o no tiene 9 dígitos.")
+                continue
+            if not (item.owner_document_id or "").strip():
+                reject(item, "Falta el DNI o Carnet de Extranjería.", phone)
+                continue
+            try:
+                doc = normalize_document_id(item.owner_document_id)
+            except ValueError:
+                reject(item, "DNI inválido (8 dígitos) o CE inválido (9 a 12 caracteres).", phone)
+                continue
+            if lot_id in seen_lots:
+                reject(item, f"Lote repetido en el archivo (también en la fila {seen_lots[lot_id]}).", phone)
+                continue
+            if phone in seen_phones and seen_phones[phone] != doc:
+                reject(item, "El mismo celular aparece con otro DNI en el archivo.", phone)
+                continue
+            existing = await self.people.get_by_phone(phone)
+            if existing and existing.document_id and existing.document_id != doc:
+                reject(item, "Este celular ya tiene otro DNI registrado; corrígelo en Integrantes.", phone)
+                continue
+            seen_lots[lot_id] = item.row_number
+            seen_phones[phone] = doc or ""
+            valid.append(
+                BulkLotItem(
+                    row_number=item.row_number,
+                    lot_id=lot_id,
+                    owner_name=name,
+                    owner_phone=phone,
+                    owner_document_id=doc,
+                    is_maintenance_up_to_date=item.is_maintenance_up_to_date,
+                )
+            )
+
+        created, updated, processed = (0, 0, [])
+        if valid:
+            created, updated, processed = await self.repo.upsert_bulk_lots(norm, valid)
         log_audit_event(
             event="LOTS_BULK_SYNC",
             actor=f"{norm}:{actor}",
             client_ip=client_ip,
             user_agent=user_agent,
-            details={"villa_id": norm, "processed_count": len(processed), "created_count": created, "updated_count": updated},
+            details={
+                "villa_id": norm,
+                "processed_count": len(processed),
+                "created_count": created,
+                "updated_count": updated,
+                "rejected_count": len(rejected),
+            },
         )
         return BulkUpsertLotsResponse(
-            villa_id=norm, processed_count=len(processed), created_count=created, updated_count=updated, lots=processed
+            villa_id=norm,
+            processed_count=len(processed),
+            created_count=created,
+            updated_count=updated,
+            rejected_count=len(rejected),
+            rejected=rejected,
+            lots=processed,
         )
 
     # ---------------- membresías ----------------
@@ -199,7 +276,7 @@ class LotsService:
                     )
 
         doc = _clean_doc(payload.document_id)
-        if not doc and not is_admin:
+        if not doc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="El DNI o Carnet de Extranjería del integrante es obligatorio: se le pedirá al activar su cuenta.",

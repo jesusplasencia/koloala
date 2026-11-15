@@ -241,52 +241,31 @@ class UpdateLotMaintenanceRequest(BaseModel):
 
 
 class BulkLotItem(BaseModel):
-    lot_id: str = Field(
-        ...,
-        min_length=2,
-        max_length=10,
-        examples=["B14", "U28", "P20"],
-        description="Identificador Manzana y Lote (ej. B14, U28, P20)",
-    )
-    owner_name: str = Field(
-        default="Propietario",
-        min_length=2,
-        max_length=100,
-        examples=["Jesus Plasencia"],
-    )
-    owner_phone: str | None = Field(
-        default=None,
-        max_length=30,
-        examples=["987654321"],
-        description="Celular de WhatsApp de la Persona-Ancla (ANCHOR)",
-    )
-    owner_document_id: str | None = Field(
-        default=None,
-        max_length=15,
-        examples=["71234567"],
-        description="DNI o CE del titular: se le pedirá al activar su cuenta por primera vez",
-    )
-    is_maintenance_up_to_date: bool
+    """Fila del padrón tal como llega del CSV: se valida fila por fila en el servicio
+    (una fila mala se reporta y NO tumba la carga completa)."""
 
-    @field_validator("lot_id", mode="before")
-    @classmethod
-    def _validate_lot_id(cls, value: str) -> str:
-        return normalize_lot_id(value)
-
-    @field_validator("owner_document_id", mode="before")
-    @classmethod
-    def _validate_doc(cls, value: str | None) -> str | None:
-        from app.core.pii import normalize_document_id
-
-        return normalize_document_id(value) if value else None
+    row_number: int | None = Field(default=None, description="Número de fila en el CSV (para el reporte de errores)")
+    lot_id: str = Field(default="", max_length=40, examples=["P20"])
+    owner_name: str | None = Field(default=None, max_length=150, examples=["Jesus Plasencia"])
+    owner_phone: str | None = Field(default=None, max_length=40, examples=["987654321"])
+    owner_document_id: str | None = Field(default=None, max_length=40, examples=["71234567"])
+    is_maintenance_up_to_date: bool = True
 
 
 class BulkUpsertLotsRequest(BaseModel):
     lots: list[BulkLotItem] = Field(
         ...,
         min_length=1,
-        description="Lista de lotes de la Villa a sincronizar (crea nuevos o actualiza existentes)",
+        max_length=1000,
+        description="Filas del padrón (lote, propietario, celular y DNI obligatorios por fila)",
     )
+
+
+class BulkRejectedRow(BaseModel):
+    row_number: int | None
+    lot_id: str | None
+    phone: str | None = Field(default=None, description="Enmascarado (*****4321)")
+    reason: str
 
 
 class BulkUpsertLotsResponse(BaseModel):
@@ -294,6 +273,8 @@ class BulkUpsertLotsResponse(BaseModel):
     processed_count: int
     created_count: int
     updated_count: int
+    rejected_count: int = 0
+    rejected: list[BulkRejectedRow] = Field(default_factory=list)
     lots: list[PropertyLot]
 
 

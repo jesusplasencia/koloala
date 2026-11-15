@@ -94,7 +94,7 @@ async def test_household_cap_per_lot(client: AsyncClient, monkeypatch, h, world)
     assert codes[2] == 409
     # El Admin sí puede superar el tope
     r = await client.post(f"{API}/lots/B14/members", headers=h.admin,
-                          json={"phone": "980000009", "full_name": "Extra"})
+                          json={"phone": "980000009", "full_name": "Extra", "document_id": "70000009"})
     assert r.status_code in (200, 201)
 
 

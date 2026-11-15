@@ -162,7 +162,7 @@ class InMemoryLotRepository:
                 created += 1
             if item.owner_phone:
                 person = await self.people.upsert_person(
-                    item.owner_phone, item.owner_name, item.owner_document_id, overwrite=True
+                    item.owner_phone, item.owner_name, item.owner_document_id, overwrite=False
                 )
                 await self.upsert_membership(norm, key[1], person.id, MembershipRole.ANCHOR)
             processed.append(await self._with_owner(lot))

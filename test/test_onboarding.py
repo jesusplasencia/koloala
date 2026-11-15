@@ -50,7 +50,10 @@ async def test_anchor_must_provide_household_dni_and_admin_can_fix_it(client, h,
     )
     assert ok.status_code == 201 and ok.json()["document_id"] == "******22"
 
-    await client.post(f"{API}/lots/B14/members", headers=h.admin, json={"phone": "955000666", "full_name": "Pendiente"})
+    # Persona antigua sin DNI (ya no se puede crear así desde la app): el admin la completa
+    assert (await client.post(f"{API}/lots/B14/members", headers=h.admin, json={"phone": "955000666", "full_name": "Pendiente"})).status_code == 422
+    legacy = world.people.ensure_person("955000666", "Pendiente")
+    await world.lots.upsert_membership("VC3", "B14", legacy.id, MembershipRole.HOUSEHOLD)
     assert (await _activate(client, "955000666", "40999888")).status_code == 409
     assert (await client.patch(f"{API}/lots/B14/members/955000666", headers=h.anchor_b14, json={"document_id": "40999888"})).status_code == 403
     fixed = await client.patch(f"{API}/lots/B14/members/955000666", headers=h.admin, json={"document_id": "40999888"})
