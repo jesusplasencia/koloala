@@ -275,7 +275,8 @@ class LotsService:
         if not current or not current.person_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="El integrante no está activo en ese lote.")
         doc = _clean_doc(payload.document_id) if payload.document_id else None
-        doc_changed = bool(doc) and doc != current.document_id
+        # Solo se restablece el acceso al REEMPLAZAR un DNI existente; completar uno vacío no bloquea a nadie.
+        doc_changed = bool(doc) and bool(current.document_id) and doc != current.document_id
         await self.people.update_person(
             current.person_id,
             full_name=payload.full_name.strip() if payload.full_name else None,

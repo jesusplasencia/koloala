@@ -81,3 +81,24 @@ async def test_admin_dni_change_resets_access_and_closes_sessions(client, h, wor
     assert (await _activate(client, "955000888", "40200200")).status_code == 200
     relogin = await client.post(f"{API}/auth/login", json={"username": "955000888", "password": pins["51955000888"]})
     assert relogin.status_code == 200
+
+
+async def test_filling_empty_dni_keeps_access_but_replacing_resets(client, h, world, pins):
+    person = world.people.ensure_person("955000777", "Ya Activo", None, pin="55556666")
+    await world.lots.upsert_membership("VC3", "B14", person.id, MembershipRole.HOUSEHOLD)
+    login = await client.post(f"{API}/auth/login", json={"username": "955000777", "password": "55556666"})
+    token = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    filled = await client.patch(f"{API}/lots/B14/members/955000777", headers=h.admin, json={"document_id": "40700700"})
+    assert filled.status_code == 200 and filled.json()["document_id"] == "******00"
+    # Completar un DNI vacío no cierra la sesión ni invalida el PIN
+    assert (await client.get(f"{API}/lots/my-memberships", headers=token)).status_code == 200
+    assert (await client.post(f"{API}/auth/login", json={"username": "955000777", "password": "55556666"})).status_code == 200
+
+    # Guardar el mismo DNI tampoco resetea
+    await client.patch(f"{API}/lots/B14/members/955000777", headers=h.admin, json={"document_id": "40700700"})
+    assert (await client.post(f"{API}/auth/login", json={"username": "955000777", "password": "55556666"})).status_code == 200
+
+    # Reemplazar un DNI existente sí restablece el acceso
+    await client.patch(f"{API}/lots/B14/members/955000777", headers=h.admin, json={"document_id": "40800800"})
+    assert (await client.post(f"{API}/auth/login", json={"username": "955000777", "password": "55556666"})).status_code == 401
